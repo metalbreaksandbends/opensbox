@@ -52,6 +52,7 @@ internal partial class GameInstanceDll
 		var instance = new SceneNetworkSystem( TypeLibrary, system );
 
 		NetworkedLargeFiles.NetworkInitialize( instance );
+		Platform.Chat.NetworkInitialize( instance );
 
 		if ( Networking.IsHost )
 		{
@@ -77,7 +78,7 @@ internal partial class GameInstanceDll
 			NetworkedConfigFiles.Refresh();
 			NetworkedLangFiles.Refresh();
 
-			ResourceLoader.LoadAllGameResource( FileSystem.Mounted );
+			ResourceLoader.LoadAllGameResource( FileSystem.Mounted, reloadExisting: true );
 			FontManager.Instance.LoadAll( FileSystem.Mounted );
 
 			DidMountNetworkedFiles = true;
@@ -91,6 +92,7 @@ internal partial class GameInstanceDll
 		var instance = new SceneNetworkSystem( TypeLibrary, system );
 
 		NetworkedLargeFiles.NetworkInitialize( instance );
+		Platform.Chat.NetworkInitialize( instance );
 
 		if ( Networking.IsHost )
 		{
@@ -115,7 +117,7 @@ internal partial class GameInstanceDll
 			NetworkedLangFiles.Refresh();
 
 			LoadingScreen.Title = "Loading Resources";
-			await ResourceLoader.LoadAllGameResourceAsync( FileSystem.Mounted );
+			await ResourceLoader.LoadAllGameResourceAsync( FileSystem.Mounted, reloadExisting: true );
 			FontManager.Instance.LoadAll( FileSystem.Mounted );
 
 			DidMountNetworkedFiles = true;
