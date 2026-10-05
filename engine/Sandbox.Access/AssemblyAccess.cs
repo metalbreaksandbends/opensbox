@@ -138,7 +138,6 @@ internal partial class AssemblyAccess
 			TestModule( module );
 		}
 
-		RemoveLocalTouches();
 	}
 
 	private void TestModule( ModuleDefinition module )
@@ -211,6 +210,18 @@ internal partial class AssemblyAccess
 		if ( (type.Attributes & Mono.Cecil.TypeAttributes.ExplicitLayout) != 0 && !TypeAllowedExplicitLayout( type ) )
 		{
 			Touch( $"System.Private.CoreLib/System.Runtime.InteropServices.StructLayout", "attribute" );
+		}
+
+		// ComImport is a metadata flag, not a real attribute, so the attribute checks miss it.
+		// Left unchecked a [ComImport] type can spin up arbitrary COM objects and escape the sandbox.
+		if ( type.IsImport )
+		{
+			Touch( $"System.Private.CoreLib/System.Runtime.InteropServices.ComImportAttribute", "attribute" );
+		}
+
+		if ( type.FullName == IgnoresAccessChecksTo )
+		{
+			Touch( $"System.Private.CoreLib/{IgnoresAccessChecksTo}", "attribute" );
 		}
 
 		TestAttributes( type.CustomAttributes );
@@ -381,8 +392,17 @@ internal partial class AssemblyAccess
 
 	}
 
+	/// <summary>
+	/// The runtime honours this attribute by name from any assembly and skips visibility checks against the
+	/// assemblies it names, so a self-defined copy would let a package call engine internals.
+	/// </summary>
+	const string IgnoresAccessChecksTo = "System.Runtime.CompilerServices.IgnoresAccessChecksToAttribute";
+
 	private void TestAttribute( CustomAttribute attr )
 	{
+		if ( attr.AttributeType.FullName == IgnoresAccessChecksTo )
+			Touch( $"System.Private.CoreLib/{IgnoresAccessChecksTo}", "attribute" );
+
 		Touch( attr.AttributeType );
 
 		foreach ( var arg in attr.ConstructorArguments )
@@ -534,26 +554,4 @@ internal partial class AssemblyAccess
 		return true;
 	}
 
-	/// <summary>
-	/// Remove touches that are inside addon depends or this dll.
-	/// </summary>
-	void RemoveLocalTouches()
-	{
-		var whitelist = new List<string>();
-		whitelist.AddRange( Global.SafeAssemblies.Select( x => $"{x.Key}/" ) );
-		whitelist.Add( $"{Assembly.Name.Name}/" );
-
-		Parallel.ForEach( Touched.Keys, ( key ) =>
-		{
-			//
-			// Don't bother looking at them if they're in our list of approved
-			//
-			if ( whitelist.Any( x => key.StartsWith( x ) ) )
-			{
-				Touched.Remove( key, out var _ );
-				return;
-			}
-		} );
-
-	}
 }

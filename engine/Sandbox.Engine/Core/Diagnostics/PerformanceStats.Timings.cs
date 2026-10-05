@@ -18,6 +18,7 @@ public static partial class PerformanceStats
 		public static Timings Audio { get; } = Get( "Audio", "#bdb2ff" );
 		public static Timings Editor { get; } = Get( "Editor", "#7f8188" );
 		//	public static Timings Io { get; } = Get( "IO", "#b5838d" );
+		public static Timings Idle { get; } = Get( "Idle", "#808080" );
 		public static Timings Input { get; } = Get( "Input", "#e9ff70" );
 		//	public static Timings Internal { get; } = Get( "Internal", "#e5e5e5" );
 		public static Timings NavMesh { get; } = Get( "NavMesh", "#738D45" );
@@ -39,7 +40,7 @@ public static partial class PerformanceStats
 
 		private static ReadOnlyCollection<Timings> BuildMain()
 		{
-			var list = new List<Timings> { Async, Animation, Audio, GcPause, Input, NavMesh, Network, Particles, Physics, Render, Update, Ui, Video };
+			var list = new List<Timings> { Async, Animation, Audio, GcPause, Idle, Input, NavMesh, Network, Particles, Physics, Render, Update, Ui, Video };
 			if ( Application.IsEditor )
 				list.Add( Editor );
 			return list.AsReadOnly();
@@ -66,7 +67,9 @@ public static partial class PerformanceStats
 			if ( All.TryGetValue( stage, out var timing ) )
 				return timing;
 
-			return All.GetOrAdd( stage, f => new Timings( stage, color ?? Color.White ) );
+			// Static lambda with the colour passed as state. A capturing lambda here would allocate its closure on
+			// entry, before the lookup above, so every scope paid for it even on a hit.
+			return All.GetOrAdd( stage, static ( s, c ) => new Timings( s, c ?? Color.White ), color );
 		}
 
 		internal Timings( string name, Color color )

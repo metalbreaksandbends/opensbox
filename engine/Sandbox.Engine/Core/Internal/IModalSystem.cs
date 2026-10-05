@@ -1,4 +1,6 @@
-﻿namespace Sandbox.Modals;
+﻿using Sandbox.UI;
+
+namespace Sandbox.Modals;
 
 public interface IModalSystem
 {
@@ -13,6 +15,7 @@ public interface IModalSystem
 	public void Review( Package package );
 	public void Report( string packageIdent );
 	public void PackageSelect( string query, Action<Package> onPackageSelected, Action<string> onFilterChanged = null );
+	public void MapSelect( Action<string> onMapSelected, string selected = null );
 	public void FriendsList( in FriendsListModalOptions options );
 	public void Server( Sandbox.Network.LobbyInformation lobby );
 	public void ServerList( in ServerListConfig config );
@@ -23,11 +26,17 @@ public interface IModalSystem
 	public void PlayerList();
 	public void WorkshopPublish( in WorkshopPublishOptions options );
 	public void Notice( string title, string message, string icon );
+	public void ServiceConnector();
 
 	/// <summary>
 	/// The menu that is shown when escape is pressed while playing.
 	/// </summary>
 	public void PauseMenu();
+
+	/// <summary>
+	/// Shows the benchmark results panel after a local benchmark run completes.
+	/// </summary>
+	public void BenchmarkResults( Guid batchId, IReadOnlyList<BenchmarkTestSummary> summaries );
 
 	public bool IsModalOpen { get; }
 	public bool IsPauseMenuOpen { get; }
@@ -49,6 +58,62 @@ public struct FriendsListModalOptions
 	/// Show online (but not in-game) members
 	/// </summary>
 	public bool ShowOnlineMembers { get; set; } = true;
+
+	/// <summary>
+	/// If set, the modal will open anchored next to a panel (eg. the button that opened it)
+	/// instead of centered on screen.
+	/// </summary>
+	public Anchoring? Anchor { get; set; }
+
+	/// <summary>
+	/// Anchors a modal next to a source panel (eg. the button that opened it), instead of it
+	/// opening centered on screen. See <see cref="FriendsListModalOptions.Anchor"/>.
+	/// </summary>
+	public struct Anchoring
+	{
+		public Anchoring() { }
+
+		/// <summary>
+		/// The panel to anchor next to.
+		/// </summary>
+		public Panel Panel { get; set; }
+
+		/// <summary>
+		/// Which side of <see cref="Panel"/> to anchor to.
+		/// </summary>
+		public ModalAnchorPosition Position { get; set; } = ModalAnchorPosition.BelowRight;
+
+		/// <summary>
+		/// Gap between <see cref="Panel"/> and the modal.
+		/// </summary>
+		public float Offset { get; set; } = 8.0f;
+	}
+}
+
+/// <summary>
+/// Where to anchor a modal relative to a source panel. See <see cref="FriendsListModalOptions.Anchoring"/>.
+/// </summary>
+public enum ModalAnchorPosition
+{
+	/// <summary>
+	/// Below the source panel, aligned to its left edge.
+	/// </summary>
+	BelowLeft,
+
+	/// <summary>
+	/// Below the source panel, aligned to its right edge.
+	/// </summary>
+	BelowRight,
+
+	/// <summary>
+	/// Above the source panel, aligned to its left edge.
+	/// </summary>
+	AboveLeft,
+
+	/// <summary>
+	/// Above the source panel, aligned to its right edge.
+	/// </summary>
+	AboveRight,
 }
 
 
@@ -77,6 +142,21 @@ public struct CreateGameOptions
 
 	public Package Package { get; set; }
 	public Action<CreateGameResults> OnComplete { get; set; }
+
+	/// <summary>
+	/// The setup to edit instead of loading the player's last saved setup for this game.
+	/// </summary>
+	public CreateGameResults? InitialSettings { get; set; }
+
+	/// <summary>
+	/// Show this as a settings form with a Save Settings button. The completion callback decides what happens next.
+	/// </summary>
+	public bool ConfigureOnly { get; set; }
+
+	/// <summary>
+	/// Minimum server capacity required by the caller, such as the number of players in a party.
+	/// </summary>
+	public int MinimumPlayers { get; set; }
 }
 
 public struct CreateGameResults
@@ -87,7 +167,13 @@ public struct CreateGameResults
 
 	public Dictionary<string, string> GameSettings { get; set; } = new();
 
-	public string MapIdent { get; set; }
+	[Obsolete( "Use Map instead" )]
+	public string MapIdent => Map;
+
+	/// <summary>
+	/// The user selected map. This can be an ident of a package, or path to a mount scene.
+	/// </summary>
+	public string Map { get; set; }
 
 	public int MaxPlayers { get; set; }
 
@@ -188,4 +274,19 @@ public struct WorkshopPublishOptions
 
 		Categories[name] = prop;
 	}
+}
+
+/// <summary>
+/// Display-ready summary of a single benchmark test, passed to IModalSystem.BenchmarkResults.
+/// </summary>
+public struct BenchmarkTestSummary
+{
+	public string Name { get; set; }
+	public double AvgFps { get; set; }
+	public double AvgFrameTimeMs { get; set; }
+	/// <summary>P99 frame time — time exceeded by 1% of frames.</summary>
+	public double OnePercentLowMs { get; set; }
+	public double AvgGpuFrametimeMs { get; set; }
+	public double Stuttering { get; set; }
+	public double DurationSeconds { get; set; }
 }

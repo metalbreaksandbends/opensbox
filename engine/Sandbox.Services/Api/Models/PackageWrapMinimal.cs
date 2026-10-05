@@ -4,7 +4,7 @@ namespace Sandbox.Services;
 
 public class PackageWrapMinimal
 {
-	public OrganizationDto Org { get; set; }
+	public OrganizationMinimal Org { get; set; }
 
 	[JsonIgnore]
 	public long AssetId { get; set; }
@@ -16,6 +16,7 @@ public class PackageWrapMinimal
 	public string Thumb { get; set; }
 	public string ThumbWide { get; set; }
 	public string ThumbTall { get; set; }
+	public PackageThumbnailSet Thumbnails { get; set; }
 	public string VideoThumb { get; set; }
 	public string TypeName { get; set; }
 	public DateTimeOffset Updated { get; set; }
@@ -32,6 +33,12 @@ public class PackageWrapMinimal
 	public int VotesDown { get; set; }
 	public bool Public { get; set; }
 	public bool Mature { get; set; }
+
+	/// <summary>
+	/// Small icon badges shown over the thumbnail in lists — workshop-approved,
+	/// updated-since-you-played, etc. Computed at wrap time; may be empty, never null.
+	/// </summary>
+	public List<PackageFlair> Flair { get; set; } = [];
 
 	// Added afterwards, describes how a user interacted with this package
 	public PackageInteraction Interaction { get; set; }

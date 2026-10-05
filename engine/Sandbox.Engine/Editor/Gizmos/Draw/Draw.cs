@@ -15,10 +15,11 @@ public static partial class Gizmo
 	/// </summary>
 	public sealed partial class GizmoDraw
 	{
-		static Material LineMaterial = Material.Load( "materials/gizmo/line.vmat" );
-		static Material SolidMaterial = Material.Load( "materials/gizmo/solid.vmat" );
-		static Material SpriteMaterial = Material.Load( "materials/gizmo/sprite.vmat" );
-		static Material GridMaterial = Material.Load( "materials/gizmo/grid.vmat" );
+		// Loaded on first draw, so scenes that never draw a gizmo don't load them
+		static Material LineMaterial => field ??= Material.Load( "materials/gizmo/line.vmat" );
+		static Material SolidMaterial => field ??= Material.Load( "materials/gizmo/solid.vmat" );
+		static Material SpriteMaterial => field ??= Material.Load( "materials/gizmo/sprite.vmat" );
+		static Material GridMaterial => field ??= Material.Load( "materials/gizmo/grid.vmat" );
 
 		internal GizmoDraw()
 		{
@@ -45,6 +46,8 @@ public static partial class Gizmo
 
 		static VertexSceneObject _vertexObject;
 		static string _vertexObjectPath;
+		static Material _vertexObjectMaterial;
+		static Texture _vertexObjectTexture;
 
 		/// <summary>
 		/// Ignore depth when drawing, draw on top of everything
@@ -89,6 +92,7 @@ public static partial class Gizmo
 
 			_vertexObject = default;
 			_vertexObjectPath = default;
+			_vertexObjectTexture = default;
 		}
 
 		/// <summary>
@@ -256,9 +260,13 @@ public static partial class Gizmo
 
 			so.RenderLayer = SceneRenderLayer.OverlayWithoutDepth;
 			so.CommandList.Reset();
+			var radii = BorderRadii.FromPublic( borderRadius ).Clamped( rect.Width, rect.Height );
+
 			so.CommandList.Attributes.Set( "BoxPosition", new Vector2( rect.Left, rect.Top ) );
 			so.CommandList.Attributes.Set( "BoxSize", new Vector2( rect.Width, rect.Height ) );
-			so.CommandList.Attributes.Set( "BorderRadius", borderRadius );
+			so.CommandList.Attributes.Set( "BoxBloat", 1.0f );
+			so.CommandList.Attributes.Set( "BorderRadius", radii.Horizontal );
+			so.CommandList.Attributes.Set( "BorderRadiusV", radii.Vertical );
 			so.CommandList.Attributes.Set( "Texture", Texture.White );
 			so.CommandList.Attributes.SetCombo( "D_BACKGROUND_IMAGE", 0 );
 			so.CommandList.Attributes.SetCombo( "D_BORDER_IMAGE", 0 );
@@ -279,7 +287,7 @@ public static partial class Gizmo
 				so.CommandList.Attributes.Set( "HasBorder", 0 );
 			}
 
-			so.CommandList.DrawQuad( rect, Material.UI.Box, color );
+			so.CommandList.DrawQuad( rect.Grow( 1 ), Material.UI.Box, color );
 		}
 
 		/// <summary>

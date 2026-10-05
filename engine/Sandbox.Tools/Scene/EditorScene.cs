@@ -79,7 +79,7 @@ public static class EditorScene
 		}
 
 		session = SceneEditorSession.CreateFromPath( resource.ResourcePath );
-		session.MakeActive();
+		session?.MakeActive();
 	}
 
 	/// <summary>
@@ -242,6 +242,11 @@ public static class EditorScene
 		playableSession ??= FindPlayableSession();
 		if ( playableSession is null ) return;
 
+		SceneLoadOptions options = null;
+		if ( !playMode && !SceneSource.PreparePlay( playableSession, out options ) )
+			return;
+
+		using var runtimePreparation = options?.RuntimePreparationScope();
 		OnPlayStore();
 
 		Game.IsPlaying = true;
@@ -252,9 +257,18 @@ public static class EditorScene
 
 		if ( playMode )
 		{
-			LoadingScreen.IsVisible = true;
-			LoadingScreen.Title = "Loading Game..";
-			IGameInstanceDll.Current.EditorPlay();
+			if ( IGameInstance.Current is not null )
+			{
+				LoadingScreen.IsVisible = true;
+				LoadingScreen.Title = "Loading Game..";
+				if ( !IGameInstanceDll.Current.EditorPlay() )
+				{
+					Game.IsPlaying = false;
+					LoadingScreen.IsVisible = false;
+					OnPlayRestore();
+					return;
+				}
+			}
 		}
 		else
 		{
@@ -267,19 +281,31 @@ public static class EditorScene
 				Game.ActiveScene = null;
 			}
 
-			var current = playableSession.Scene.CreateSceneFile();
 			var name = playableSession.Scene.Name;
 
 			Game.ActiveScene = new Scene();
 			Game.ActiveScene.Name = name;
 			Game.ActiveScene.StartLoading();
 
-			var options = new SceneLoadOptions();
-			options.SetScene( current );
+			if ( options is null )
+			{
+				options = new SceneLoadOptions();
+				options.SetScene( playableSession.Scene.CreateSceneFile() );
+			}
+			using var scenePreparation = options.RuntimePreparationScope();
+			var prepared = options.PrepareRuntime();
+			if ( prepared )
+				Game.ActiveScene.RunEvent<ISceneStartup>( x => x.OnHostPreInitialize( options.GetSceneFile() ) );
 
-			Game.ActiveScene.RunEvent<ISceneStartup>( x => x.OnHostPreInitialize( options.GetSceneFile() ) );
-
-			Game.ActiveScene.Load( options );
+			if ( !prepared || !Game.ActiveScene.Load( options ) )
+			{
+				Game.ActiveScene.Destroy();
+				Game.ActiveScene = null;
+				Game.IsPlaying = false;
+				LoadingScreen.IsVisible = false;
+				OnPlayRestore();
+				return;
+			}
 
 			Game.ActiveScene.RunEvent<ISceneStartup>( x => x.OnHostInitialize() );
 			Game.ActiveScene.RunEvent<ISceneStartup>( x => x.OnClientInitialize() );
@@ -292,7 +318,6 @@ public static class EditorScene
 		}
 
 		SceneEditorSession.Active.SetPlaying( Game.ActiveScene );
-
 		EditorEvent.Run( "scene.play" );
 	}
 
@@ -303,7 +328,7 @@ public static class EditorScene
 
 		Game.IsClosing = true;
 
-		SceneEditorSession.Active.StopPlaying();
+		SceneEditorSession.Playing?.StopPlaying();
 
 		Game.IsPlaying = false;
 		Game.IsPaused = false;
@@ -354,18 +379,16 @@ public static class EditorScene
 		Assert.NotNull( resource, "resource should not be null" );
 
 		var session = SceneEditorSession.CreateFromPath( resource.ResourcePath );
-		session.MakeActive();
+		session?.MakeActive();
 	}
 
 	internal static void UpdatePrefabInstancesInScene( Scene scene, PrefabFile prefab )
 	{
-		var changedPath = prefab.ResourcePath;
-
 		using ( scene.Push() )
 		{
 			// Copy, because this collection can be modified during prefab updating ( e.g. refreshing/deserializing prefab spawns GOs or components)
 			var prefabInstancesRequiringUpdate = scene.GetAllObjects( false )
-				.Where( x => x.IsPrefabInstanceRoot && x.PrefabInstanceSource == changedPath )
+				.Where( x => x.IsPrefabInstanceRoot && x.PrefabInstance.PrefabSource.Guid == prefab.Guid )
 				.Select( x => x.OutermostPrefabInstanceRoot ) // We always need to update the outermostprefab instance
 				.ToHashSet();
 			foreach ( var obj in prefabInstancesRequiringUpdate )
@@ -389,10 +412,6 @@ public static class EditorScene
 		ArgumentNullException.ThrowIfNull( prefab );
 
 		var allSessions = SceneEditorSession.All;
-
-		// If only the edited prefab session is open, there's nothing else to update
-		if ( allSessions.Count <= 1 )
-			return;
 
 		// First pass: update other open prefab sessions that may contain instances
 		// of this prefab, then write their changes so dependent prefabs stay current
@@ -487,11 +506,15 @@ public static class EditorScene
 
 		var serialized = selection.Select( x =>
 		{
+			using var blobs = BlobDataSerializer.Capture();
+
 			var s = x.Serialize( options );
 			// When we copy we keep the world transform.
 			s["Position"] = JsonValue.Create( x.WorldPosition );
 			s["Rotation"] = JsonValue.Create( x.WorldRotation );
 			s["Scale"] = JsonValue.Create( x.WorldScale );
+
+			blobs.SaveTo( s );
 			return s;
 		} );
 
@@ -588,6 +611,8 @@ public static class EditorScene
 							var go = SceneEditorSession.Active.Scene.CreateObject();
 							// avoids some warnings
 							SceneUtility.MakeIdGuidsUnique( jso );
+
+							using var blobs = BlobDataSerializer.LoadFrom( jso );
 							go.Deserialize( jso );
 
 							if ( target.IsValid() )

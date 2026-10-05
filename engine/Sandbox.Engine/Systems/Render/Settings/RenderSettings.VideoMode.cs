@@ -47,47 +47,78 @@ public partial class RenderSettings
 			return value.FromEngine();
 		}
 
-		set => VideoSettings.Set( "aaquality", value.ToEngine() );
+		set => VideoSettings.Set( "aaquality", GetSupportedAntiAliasQuality( value ).ToEngine() );
+	}
+
+	/// <summary>Returns the requested MSAA amount when supported, or the best available amount.</summary>
+	public static MultisampleAmount GetSupportedAntiAliasQuality( MultisampleAmount amount ) =>
+		NativeEngine.RenderDeviceManager.GetBestMultisampleType( amount.ToEngine() ).FromEngine();
+
+	internal struct VideoModeSnapshot
+	{
+		public int Width, Height;
+		public bool Fullscreen, Borderless, VSync;
+		public MultisampleAmount AntiAlias;
+		public int MaxFps, MaxFpsInactive;
+		public float Fov;
+	}
+
+	internal VideoModeSnapshot CaptureSnapshot() => new VideoModeSnapshot
+	{
+		Width = ResolutionWidth,
+		Height = ResolutionHeight,
+		Fullscreen = Fullscreen,
+		Borderless = Borderless,
+		VSync = VSync,
+		AntiAlias = AntiAliasQuality,
+		MaxFps = MaxFrameRate,
+		MaxFpsInactive = MaxFrameRateInactive,
+		Fov = DefaultFOV,
+	};
+
+	internal void RestoreSnapshot( VideoModeSnapshot snap )
+	{
+		ResolutionWidth = snap.Width;
+		ResolutionHeight = snap.Height;
+		Fullscreen = snap.Fullscreen;
+		Borderless = snap.Borderless;
+		VSync = snap.VSync;
+		AntiAliasQuality = snap.AntiAlias;
+		MaxFrameRate = snap.MaxFps;
+		MaxFrameRateInactive = snap.MaxFpsInactive;
+		DefaultFOV = snap.Fov;
+
+		ApplyVideoMode();
+		VideoSettings.Save();
 	}
 
 	private void ApplyVideoMode()
 	{
-		// No changing this in the editor
-		if ( Application.IsEditor )
-			return;
+		if ( GameWindow.Current is not { } window ) return;
 
-		NativeEngine.RenderDeviceManager.ChangeVideoMode( Fullscreen, Borderless, VSync, ResolutionWidth, ResolutionHeight, AntiAliasQuality.ToEngine() );
-
-		if ( Borderless )
+		if ( Borderless && !Fullscreen )
 		{
-			int desktopWidth = 0;
-			int desktopHeight = 0;
-			uint desktopRefreshRate = 0;
-			EngineGlobal.Plat_GetDesktopResolution( EngineGlobal.Plat_GetDefaultMonitorIndex(), ref desktopWidth, ref desktopHeight, ref desktopRefreshRate );
-			ResolutionWidth = desktopWidth;
-			ResolutionHeight = desktopHeight;
-		}
-	}
-
-	public unsafe VideoDisplayMode[] DisplayModes( bool windowed )
-	{
-		var modes = new VideoDisplayMode[256];
-
-		fixed ( VideoDisplayMode* ptr = modes )
-		{
-			var c = NativeEngine.RenderDeviceManager.GetDisplayModes( ptr, modes.Length, windowed );
-			Array.Resize( ref modes, c );
+			var size = SdlDisplay.GetDesktopSize( SdlDisplay.Current );
+			ResolutionWidth = (int)size.x;
+			ResolutionHeight = (int)size.y;
 		}
 
-		return modes;
+		window.QueueVideoMode( GameWindow.VideoMode.FromSettings( this ) );
 	}
 
+	/// <summary>
+	/// Lists SDL fullscreen modes for the current display. Both windowed and fullscreen settings use
+	/// this list; <paramref name="windowed"/> is retained for compatibility and does not filter it.
+	/// All returned formats are RGBA8888, matching the game swapchain.
+	/// </summary>
+	public VideoDisplayMode[] DisplayModes( bool windowed ) => SdlDisplay.GetModes( SdlDisplay.Current );
 
 	public struct VideoDisplayMode
 	{
 		public int Width { get; set; }
 		public int Height { get; set; }
 		public float RefreshRate { get; set; }
+		/// <summary>The game swapchain format (RGBA8888), rather than the display's native pixel format.</summary>
 		public ImageFormat Format { get; set; }
 	}
 }

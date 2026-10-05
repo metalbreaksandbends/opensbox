@@ -286,6 +286,10 @@ public sealed partial class SkinnedModelRenderer : ModelRenderer, Component.Exec
 	{
 		BuildBoneHierarchy();
 
+		// If the model is changing, let go of any voice morphs now, while the
+		// scene object still has the old model our morph indices belong to
+		ReleaseVoiceMorphs();
+
 		base.UpdateObject();
 
 		if ( !SceneModel.IsValid() )
@@ -380,7 +384,7 @@ public sealed partial class SkinnedModelRenderer : ModelRenderer, Component.Exec
 		if ( PlayAnimationsInEditorScene ) return true;
 
 		// Do we have any modified animgraph parameters?
-		if ( parameters.Count > 0 )
+		if ( StoredParameterCount > 0 )
 			return true;
 
 		// If we're not using animgraph, do we have a sequence selected?
@@ -391,7 +395,7 @@ public sealed partial class SkinnedModelRenderer : ModelRenderer, Component.Exec
 		return SceneModel.IsValid() && SceneModel.HasBoneOverrides();
 	}
 
-	internal bool AnimationUpdate()
+	internal bool AnimationUpdate( bool previewBindPose = false )
 	{
 		if ( !SceneModel.IsValid() )
 			return false;
@@ -400,16 +404,27 @@ public sealed partial class SkinnedModelRenderer : ModelRenderer, Component.Exec
 
 		lock ( this )
 		{
-			// Update physics bones if they exist.
-			Physics?.Update();
+			// Shared volumes are prepared before the parallel animation pass.
+			UpdateDeformations();
 
-			if ( Scene.IsEditor && !CanUpdateInEditor() )
+			if ( Scene.IsEditor && previewBindPose )
 			{
-				SceneModel.UpdateToBindPose( ReadBonesFromGameObjects );
+				// Preview the authored rest pose without applying procedural bone overrides.
+				SceneModel.UpdateToBindPose();
 			}
 			else
 			{
-				SceneModel.Update( Time.Delta, ReadBonesFromGameObjects );
+				// Update physics bones if they exist.
+				Physics?.Update();
+
+				if ( Scene.IsEditor && !CanUpdateInEditor() )
+				{
+					SceneModel.UpdateToBindPose( ReadBonesFromGameObjects );
+				}
+				else
+				{
+					SceneModel.Update( Time.Delta, ReadBonesFromGameObjects );
+				}
 			}
 		}
 
@@ -465,6 +480,9 @@ public sealed partial class SkinnedModelRenderer : ModelRenderer, Component.Exec
 	/// </summary>
 	void ReadBonesFromGameObjects()
 	{
+		// Bone map can outlive the model it was built from, so indices aren't guaranteed to still be in range.
+		var boneCount = Model.IsValid() ? Model.BoneCount : 0;
+
 		foreach ( var entry in boneToGameObject )
 		{
 			if ( !entry.Value.Flags.Contains( GameObjectFlags.ProceduralBone ) )
@@ -474,20 +492,29 @@ public sealed partial class SkinnedModelRenderer : ModelRenderer, Component.Exec
 			if ( entry.Value.Flags.Contains( GameObjectFlags.Absolute ) )
 				continue;
 
+			var boneIndex = entry.Key.Index;
+			if ( boneIndex < 0 || boneIndex >= boneCount )
+				continue;
+
 			var localTransform = entry.Value.LocalTransform;
 			if ( localTransform.IsValid )
 			{
-				SceneModel.SetParentSpaceBone( entry.Key.Index, localTransform );
+				SceneModel.SetParentSpaceBone( boneIndex, localTransform );
 			}
 		}
 	}
 
-	private SkinnedModelRenderer RootBoneMergeTarget => BoneMergeTarget.IsValid() ? BoneMergeTarget.RootBoneMergeTarget : this;
+	/// <summary>
+	/// The renderer supplying the root skeleton for this bone-merge family.
+	/// </summary>
+	internal SkinnedModelRenderer RootBoneMergeTarget => BoneMergeTarget.IsValid() ? BoneMergeTarget.RootBoneMergeTarget : this;
 
 	/// <summary>
 	/// For non procedural bones, copy the "parent space" bone from to the GameObject transform. Will
 	/// return true if any transforms have changed.
 	/// </summary>
+	Transform[] _parentSpaceScratch;
+
 	bool UpdateGameObjectsFromBones()
 	{
 		bool transformsChanged = false;
@@ -496,6 +523,12 @@ public sealed partial class SkinnedModelRenderer : ModelRenderer, Component.Exec
 
 		// The offset between our transform and root target.
 		Transform? mergeOffset = mergeTarget.IsValid() ? WorldTransform.ToLocal( mergeTarget.WorldTransform ) : default;
+
+		// Pull every parent-space bone in one interop call rather than one per bone object.
+		var boneCount = Model.IsValid() ? Model.BoneCount : 0;
+		if ( _parentSpaceScratch is null || _parentSpaceScratch.Length < boneCount )
+			_parentSpaceScratch = new Transform[boneCount];
+		SceneModel.GetParentSpaceBones( _parentSpaceScratch.AsSpan( 0, boneCount ) );
 
 		foreach ( var entry in boneToGameObject )
 		{
@@ -507,7 +540,11 @@ public sealed partial class SkinnedModelRenderer : ModelRenderer, Component.Exec
 			if ( entry.Value.Flags.Contains( GameObjectFlags.Absolute ) )
 				continue;
 
-			var transform = SceneModel.GetParentSpaceBone( entry.Key.Index );
+			var boneIndex = entry.Key.Index;
+			if ( boneIndex < 0 || boneIndex >= boneCount )
+				continue;
+
+			var transform = _parentSpaceScratch[boneIndex];
 			if ( !transform.IsValid )
 				continue;
 

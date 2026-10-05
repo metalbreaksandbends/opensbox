@@ -63,12 +63,17 @@ static class StartupLoadProject
 		}
 
 		//
-		// Add to project list if not already there
+		// Add to project list if not already there, and mark it just-opened so it's top of recent.
+		// Matters when we're launched straight from the taskbar jump list instead of the launcher.
 		//
 		{
 			var projectList = new ProjectList();
-			projectList.TryAddFromFile( path );
+			var entry = projectList.TryAddFromFile( path );
+			if ( entry != null )
+				entry.LastOpened = DateTime.Now;
 			projectList.SaveList();
+
+			TaskbarJumpList.Refresh();
 		}
 
 		//
@@ -211,7 +216,7 @@ static class StartupLoadProject
 			await project.Package.MountAsync( true );
 
 			// Mount our current project into the filesystem and make sure to load all assets
-			FileSystem.Mounted.CreateAndMount( project.GetAssetsPath() );
+			FileSystem.Mounted.Mount( project.AssetsFileSystem );
 			await ResourceLoader.LoadAllGameResourceAsync( FileSystem.Mounted, ct, true );
 		}
 		else
@@ -288,8 +293,7 @@ static class StartupLoadProject
 
 	static void UpdateProjectFilesystem( Project project )
 	{
-		var assetsPath = project.GetAssetsPath();
-		if ( !System.IO.Directory.Exists( assetsPath ) )
+		if ( !project.HasAssetsPath() )
 			return;
 
 		NativeEngine.FullFileSystem.AddProjectPath( project.Config.FullIdent, project.GetAssetsPath() );
@@ -341,7 +345,13 @@ static class StartupLoadProject
 			EditorSplashScreen.SetMessage( $"Compiling shader {i + 1}/{gr.Length} {gr[i].RelativePath}" );
 			StepProgress( (float)i / gr.Length );
 
-			await ShaderCompile.Compile( gr[i].AbsolutePath, gr[i].RelativePath, options, default );
+			var result = await ShaderCompile.Compile( gr[i].AbsolutePath, gr[i].RelativePath, options, default );
+			if ( result.Success && !result.Skipped )
+			{
+				// Resident shaders may still have combo offsets from before the compiled file was rewritten.
+				// Reload them before any further asset loading can use those offsets against the new file.
+				ConsoleSystem.Run( $"mat_reloadshaders \"{gr[i].RelativePath}\"" );
+			}
 		}
 		if ( sw.Elapsed.TotalSeconds > 2 )
 		{

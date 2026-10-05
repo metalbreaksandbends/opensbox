@@ -11,7 +11,23 @@ internal static partial class PackageManager
 	/// <summary>
 	/// The library used to load assemblies
 	/// </summary>
-	internal static AccessControl AccessControl { get; } = new AccessControl();
+	internal static AccessControl AccessControl { get; } = new AccessControl { PackageAssemblyResolver = GetPackageAssemblyBytes };
+
+	/// <summary>
+	/// Provides the raw DLL bytes for a <c>package.*</c> assembly by searching the active packages'
+	/// assembly filesystems. Used by <see cref="AccessControl"/> to build Cecil definitions on demand
+	/// during verification. Context-free and static - it reads only global package state.
+	/// </summary>
+	private static byte[] GetPackageAssemblyBytes( string assemblyName )
+	{
+		var filename = $"{assemblyName}.dll";
+		foreach ( var ap in ActivePackages )
+		{
+			if ( ap.AssemblyFileSystem?.FileExists( filename ) != true ) continue;
+			return ap.AssemblyFileSystem.ReadAllBytes( filename ).ToArray();
+		}
+		return null;
+	}
 
 	public static BaseFileSystem MountedFileSystem { get; private set; } = new AggregateFileSystem();
 	public static HashSet<ActivePackage> ActivePackages { get; private set; } = new HashSet<ActivePackage>();
@@ -40,9 +56,6 @@ internal static partial class PackageManager
 	/// </summary>
 	internal static async Task<ActivePackage> InstallAsync( PackageLoadOptions options )
 	{
-		if ( options.PackageIdent == "local.base" )
-			options.PackageIdent = "local.base#local";
-
 		//
 		// If this package exists then mark it with our tag and move on
 		//
@@ -67,38 +80,51 @@ internal static partial class PackageManager
 		}
 
 		//
-		// If this package has dependencies then download them first
+		// Dependencies install one at a time and before this package, so they mount in a fixed order.
+		// Their files and ours all download at once in the background, and each install finds them cached.
 		//
-		await InstallDependencies( package, options );
+		using var prefetchCancel = CancellationTokenSource.CreateLinkedTokenSource( options.CancellationToken );
+		var prefetch = options.IsDependency || options.SkipAssetDownload || !package.EnumerateInstallDependencies().Any()
+			? Task.CompletedTask
+			: PrefetchAsync( package, true, options.AllowLocalPackages, prefetchCancel.Token );
 
-		var ap = await ActivePackage.Create( package, options.CancellationToken, options );
-		options.CancellationToken.ThrowIfCancellationRequested();
+		ActivePackage ap;
 
-		if ( package.IsRemote )
+		try
 		{
 			//
-			// Games should always have code archives. If they don't then they probably pre-date code archives, and need to be updated.
+			// If this package has dependencies then download them first
 			//
-			if ( package.TypeName == "game" && !ap.HasCodeArchives() )
-			{
-				throw new System.Exception( "This game has no code archive!" );
-			}
+			await InstallDependencies( package, options with { IsDependency = true } );
 
+			ap = await ActivePackage.Create( package, options.CancellationToken, options );
+			options.CancellationToken.ThrowIfCancellationRequested();
+		}
+		finally
+		{
+			// Everything it would fetch is installed by now, or we failed and don't want it
+			prefetchCancel.Cancel();
+			await prefetch;
+		}
+
+		//
+		// Prefer precompiled dlls (backend-compiled, downloaded from the manifest). If a
+		// remote package doesn't ship any, fall back to compiling its code archives locally.
+		//
+		if ( package.IsRemote && !ap.HasPrecompiledDlls() )
+		{
 			if ( ap.HasCodeArchives() )
 			{
 				options.Loading?.LoadingProgress( LoadingProgress.Create( $"Compiling {package.Title}" ) );
-				if ( !await ap.CompileCodeArchive() )
-				{
-					//
-					// If there was a compile error in a game, report it to our backend so we can keep tabs.
-					//
-					if ( package.TypeName == "game" )
-					{
-						throw new System.Exception( "There were errors when compiling this game!" );
-					}
+				Api.Activity.LoadStage( "compile" );
 
-					Log.Warning( "There were errors when compiling this game!" );
-				}
+				if ( !await ap.CompileCodeArchive() )
+					Log.Warning( $"There were errors when compiling {package.FullIdent}!" );
+			}
+			else if ( package.TypeName == "game" )
+			{
+				// A game can't run without any code
+				throw new System.Exception( "This game has no precompiled assemblies or code archives!" );
 			}
 		}
 
@@ -142,32 +168,13 @@ internal static partial class PackageManager
 	{
 		HashSet<string> dependancies = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
 
-		bool hasLocalBase = false;
-
 		//
 		// This is the right way to reference packages. We should move everything else
 		// to use this.
 		//
-		foreach ( var i in package.EnumeratePackageReferences() )
+		foreach ( var i in package.EnumerateInstallDependencies() )
 		{
 			dependancies.Add( i );
-
-			// if we have a gamemode reference - then that contains the base library!
-			if ( package.TypeName == "game" )
-			{
-				hasLocalBase = true;
-			}
-		}
-
-		if ( package is LocalPackage packageLocal )
-		{
-			//
-			// Hack Sadface: If this is a local game then include the base as a dependency
-			//
-			if ( !hasLocalBase && packageLocal.NeedsLocalBasePackage() )
-			{
-				dependancies.Add( "local.base#local" );
-			}
 		}
 
 		//
@@ -180,6 +187,42 @@ internal static partial class PackageManager
 		}
 
 		options.CancellationToken.ThrowIfCancellationRequested();
+	}
+
+	/// <summary>
+	/// Download the files of everything a package depends on into the asset cache, all at once, and the
+	/// package's own files with <paramref name="includeRoot"/>. Nothing is mounted. Never throws, the
+	/// installs report any failure.
+	/// </summary>
+	internal static async Task PrefetchAsync( Package root, bool includeRoot, bool allowLocalPackages, CancellationToken token )
+	{
+		var seen = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
+		bool Unseen( string ident ) { lock ( seen ) return seen.Add( ident ); }
+
+		async Task Prefetch( Package package, bool own )
+		{
+			var dependencies = package.EnumerateInstallDependencies().Where( Unseen ).ToArray();
+
+			var fetches = dependencies.Select( async ident =>
+			{
+				if ( Find( ident, allowLocalPackages ) is not null ) return;
+				if ( await FetchPackageAsync( ident, allowLocalPackages ) is Package dependency )
+					await Prefetch( dependency, true );
+			} );
+
+			var files = own && package.IsRemote ? package.Prefetch( token ) : Task.CompletedTask;
+			await Task.WhenAll( fetches.Append( files ) );
+		}
+
+		try
+		{
+			await Prefetch( root, includeRoot );
+		}
+		catch ( OperationCanceledException ) { }
+		catch ( Exception e )
+		{
+			log.Trace( $"Prefetching {root.FullIdent} failed: {e.Message}" );
+		}
 	}
 
 	/// <summary>
@@ -243,4 +286,3 @@ internal static partial class PackageManager
 			&& (allowLocalPackages || x.Package is not LocalPackage) );
 	}
 }
-

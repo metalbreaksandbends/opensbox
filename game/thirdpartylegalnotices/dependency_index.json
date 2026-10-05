@@ -3,6 +3,36 @@
 	"Statement": "The following libraries and components are included or used by s&box. We appreciate the developers' contributions to open & shared software.",
 	"Components": [
 		{
+			"Name": "Yoga",
+			"Comment": "Portions of the managed flexbox layout implementation and its conformance fixtures derive from Yoga 3.2.1. Source-derived code is compiled into Sandbox.Layout; no native Yoga library is required.",
+			"UsedBy": [
+				"Sandbox.Layout"
+			],
+			"License": "MIT",
+			"ProjectUrl": "https://github.com/facebook/yoga",
+			"Version": "3.2.1",
+			"Linkage": "static",
+			"Modified": true,
+			"Copyright": [
+				"Facebook, Inc. and its affiliates."
+			]
+		},
+		{
+			"Name": "Taffy",
+			"Comment": "Portions of the managed grid layout implementation and the block/grid conformance fixtures derive from Taffy. Source-derived code is compiled into Sandbox.Layout. Fixture revision: ac2b86929d35b7e0f1d24919595b89b4ce89baa4.",
+			"UsedBy": [
+				"Sandbox.Layout"
+			],
+			"License": "MIT",
+			"ProjectUrl": "https://github.com/DioxusLabs/taffy",
+			"Linkage": "static",
+			"Modified": true,
+			"Copyright": [
+				"2018 Visly Inc.",
+				"2026 Taffy Authors"
+			]
+		},
+		{
 			"Name": "SkiaSharp",
 			"Comment": "SkiaSharp is a cross-platform 2D graphics API for .NET platforms based on Google's Skia Graphics Library. It provides a comprehensive 2D API that can be used across mobile, server and desktop models to render images.",
 			"UsedBy": [
@@ -47,6 +77,23 @@
 			]
 		},
 		{
+			"Name": "Twemoji Mozilla",
+			"Comment": "COLR emoji font used as a fallback on Linux and macOS. Graphics are Twemoji (CC-BY-4.0).",
+			"UsedBy": [
+				"sbox",
+				"sbox-dev"
+			],
+			"License": "Apache-2.0",
+			"ProjectUrl": "https://github.com/mozilla/twemoji-colr",
+			"Version": "0.7.0",
+			"Linkage": "static",
+			"Modified": true,
+			"Copyright": [
+				"2016-2018 Mozilla Foundation",
+				"2020 Twitter, Inc and other contributors"
+			]
+		},
+		{
 			"Name": "MurmurHash3",
 			"Comment": "Non-cryptographic hash (public domain).",
 			"UsedBy": [
@@ -84,20 +131,6 @@
 			"Linkage": "static",
 			"Copyright": [
 				"1995-2024 Jean-loup Gailly and Mark Adler"
-			]
-		},
-		{
-			"Name": "FFTS",
-			"Comment": "The Fastest Fourier Transform in the South (FFT implementation).",
-			"UsedBy": [
-				"resourcecompiler",
-				"steamaudio"
-			],
-			"License": "BSD-3-Clause",
-			"ProjectUrl": "https://github.com/ValveSoftware/ffts",
-			"Linkage": "static",
-			"Copyright": [
-				"2012, 2013 Anthony M. Blake"
 			]
 		},
 		{
@@ -257,17 +290,18 @@
 			]
 		},
 		{
-			"Name": "Autodesk FBX SDK",
-			"Comment": "FBX import/export SDK. Autodesk® and FBX® are registered trademarks or trademarks of Autodesk, Inc., and/or its subsidiaries and/or affiliates in the USA and/or other countries. All other brand names, product names, or trademarks belong to their respective holders.",
+			"Name": "ufbx",
+			"Comment": "Single source file FBX import library.",
 			"UsedBy": [
 				"resourcecompiler",
-				"modeldoc"
+				"modeldoc",
+				"hammer"
 			],
-			"License": "Autodesk-FBX",
-			"ProjectUrl": "https://aps.autodesk.com/developer/overview/fbx-sdk",
-			"Linkage": "dynamic",
+			"License": "MIT",
+			"ProjectUrl": "https://github.com/ufbx/ufbx",
+			"Linkage": "static",
 			"Copyright": [
-				"2012 Autodesk, Inc."
+				"2020 Samuli Raivio"
 			]
 		},
 		{
@@ -356,6 +390,21 @@
 			]
 		},
 		{
+			"Name": "Slang",
+			"Comment": "Shading language & compiler; compiles our HLSL shaders to SPIR-V.",
+			"UsedBy": [
+				"vfx_vulkan"
+			],
+			"License": "Apache-2.0-with-LLVM-Exception",
+			"ProjectUrl": "https://github.com/shader-slang/slang",
+			"Linkage": "dynamic",
+			"Copyright": [
+				"NVIDIA Corporation & Affiliates",
+				"The Khronos Group Inc.",
+				"Slang contributors"
+			]
+		},
+		{
 			"Name": "embree",
 			"Comment": "Intel Embree ray tracing kernels (embree3 for vrad3; embree4 via steamaudio).",
 			"UsedBy": [
@@ -364,7 +413,7 @@
 			],
 			"License": "Apache-2.0",
 			"ProjectUrl": "https://github.com/embree/embree/",
-			"Linkage": "dynamic",
+			"Linkage": "static",
 			"Copyright": [
 				"2009-2024 Intel Corporation"
 			]
@@ -380,19 +429,6 @@
 			"Linkage": "static",
 			"Copyright": [
 				"2015 Etc2Comp Authors"
-			]
-		},
-		{
-			"Name": "fossilize",
-			"Comment": "Vulkan pipeline/shader cache management (Valve).",
-			"UsedBy": [
-				"engine2"
-			],
-			"License": "MIT",
-			"ProjectUrl": "https://github.com/ValveSoftware/Fossilize/",
-			"Linkage": "static",
-			"Copyright": [
-				"2018 Hans-Kristian Arntzen"
 			]
 		},
 		{
@@ -419,19 +455,6 @@
 			"Linkage": "static",
 			"Copyright": [
 				"2007-2010 Baptiste Lepilleur and The JsonCpp Authors"
-			]
-		},
-		{
-			"Name": "mikktspace",
-			"Comment": "Tangent space generation for normal mapping.",
-			"UsedBy": [
-				"resourcecompiler"
-			],
-			"License": "MIT",
-			"ProjectUrl": "https://github.com/mmikk/MikkTSpace/",
-			"Linkage": "header-only",
-			"Copyright": [
-				"2011 Morten S. Mikkelsen"
 			]
 		},
 		{
@@ -490,7 +513,7 @@
 		},
 		{
 			"Name": "SPIRV-Tools",
-			"Comment": "SPIR-V optimization, validation and reflection tooling.",
+			"Comment": "SPIR-V optimization, validation and reflection tooling. Also provides the id canonicalization that glslang's SPVRemapper used to.",
 			"UsedBy": [
 				"shaderpreprocessing"
 			],
@@ -633,6 +656,23 @@
 			]
 		},
 		{
+			"Name": "Mesa KosmicKrisp",
+			"Comment": "Mesa Vulkan-on-Metal driver for macOS on Apple Silicon. Loaded as libvulkan_kosmickrisp.dylib in place of a platform Vulkan loader.",
+			"UsedBy": [
+				"rendersystem"
+			],
+			"License": "MIT AND BSD-3-Clause AND SGI-B-2.0",
+			"ProjectUrl": "https://github.com/facepunch/mesa-kosmickrisp",
+			"Version": "26.3.0-devel",
+			"Linkage": "dynamic",
+			"Copyright": [
+				"Mesa contributors",
+				"1999-2007 Brian Paul",
+				"2025 LunarG, Inc.",
+				"2025 Google LLC"
+			]
+		},
+		{
 			"Name": "Box3D",
 			"Comment": "Physics Engine",
 			"UsedBy": [
@@ -644,19 +684,6 @@
 			"Copyright": [
 				"2022 Dirk Gregorius",
 				"2022 Erin Catto"
-			]
-		},
-		{
-			"Name": "Yoga",
-			"Comment": "Facebook Yoga layout engine (C# binding).",
-			"UsedBy": [
-				"engine2"
-			],
-			"License": "MIT",
-			"ProjectUrl": "https://github.com/facebook/yoga/",
-			"Linkage": "static",
-			"Copyright": [
-				"Facebook, Inc. and its affiliates"
 			]
 		},
 		{
@@ -791,7 +818,7 @@
 		},
 		{
 			"Name": "LAME",
-			"Comment": "LAME MP3 encoder (lame_enc.dll).",
+			"Comment": "LAME MP3 encoder (libmp3lame).",
 			"UsedBy": [
 				"soundssystem"
 			],
@@ -838,19 +865,6 @@
 			]
 		},
 		{
-			"Name": "OpenVR",
-			"Comment": "OpenVR runtime API (openvr_api.dll).",
-			"UsedBy": [
-				"engine2"
-			],
-			"License": "BSD-3-Clause",
-			"ProjectUrl": "https://github.com/ValveSoftware/openvr/",
-			"Linkage": "dynamic",
-			"Copyright": [
-				"2015 Valve Corporation"
-			]
-		},
-		{
 			"Name": "OpenXR",
 			"Comment": "Khronos OpenXR runtime loader (openxr_loader.dll).",
 			"UsedBy": [
@@ -890,16 +904,16 @@
 			]
 		},
 		{
-			"Name": "ToolWindowManager",
-			"Comment": "ToolWindowManager is a Qt based tool window manager. This allows Qt projects to use docking functionality similar to QDockWidget, but since it's a separate component it's easier to customise and extend and so has a number of improvements over the built-in docking system.",
+			"Name": "Qt Advanced Docking System",
+			"Comment": "Qt Advanced Docking System lets you create customizable layouts using a full featured window docking system similar to what is found in many popular integrated development environments (IDEs) such as Visual Studio.",
 			"UsedBy": [
 				"toolframework2"
 			],
-			"License": "MIT",
-			"ProjectUrl": "https://github.com/baldurk/toolwindowmanager",
-			"Linkage": "static",
+			"License": "LGPL-2.1",
+			"ProjectUrl": "https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System",
+			"Linkage": "dynamic",
 			"Copyright": [
-				"2014 Pavel Strakhov"
+				"2017 Uwe Kindler"
 			]
 		},
 		{
@@ -1034,6 +1048,23 @@
 			]
 		},
 		{
+			"Name": "PFFFT",
+			"Comment": "Pretty Fast FFT — real/complex FFT used by the sound system and Steam Audio.",
+			"UsedBy": [
+				"engine2",
+				"steamaudio"
+			],
+			"License": "BSD-3-Clause",
+			"ProjectUrl": "https://github.com/marton78/pffft",
+			"Linkage": "static",
+			"Copyright": [
+				"2020 Dario Mambro",
+				"2019 Hayati Ayguen",
+				"2013 Julien Pommier",
+				"2004 University Corporation for Atmospheric Research (UCAR)"
+			]
+		},
+		{
 			"Name": "libcurl",
 			"Comment": "HTTP client library for URL transfers.",
 			"UsedBy": [
@@ -1048,7 +1079,7 @@
 		},
 		{
 			"Name": "FidelityFX SDK",
-			"Comment": "AMD FidelityFX Super Resolution upscaling technologies. Includes FSR1 (spatial) and FSR3 (temporal) used by the rendering pipeline.",
+			"Comment": "AMD FidelityFX Super Resolution upscaling technologies. Includes FSR1 (spatial) and FSR3 (temporal) used by the rendering pipeline. Bundles a glslangValidator binary to build its shaders, licensed separately under licenses/glslang.",
 			"UsedBy": [
 				"engine2"
 			],
@@ -1056,7 +1087,22 @@
 			"ProjectUrl": "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK",
 			"Linkage": "static",
 			"Copyright": [
-				"2024 Advanced Micro Devices, Inc."
+				"2024 Advanced Micro Devices, Inc.",
+				"glslangValidator: 2002-2024 The Khronos Group Inc., 2012-2016 LunarG, Inc., 2013-2016 Google, Inc."
+			]
+		},
+		{
+			"Name": "Bend Studio Screen Space Shadows",
+			"Comment": "Bend Studio's wavefront screen-space contact shadow technique (SIGGRAPH 2023). The GPU projection code is included in shaders/common/thirdparty/bend_sss_gpu.hlsl and the CPU dispatch list builder is ported in the ScreenSpaceShadows component.",
+			"UsedBy": [
+				"sbox",
+				"sbox-dev"
+			],
+			"License": "Apache-2.0",
+			"ProjectUrl": "https://www.bendstudio.com/blog/inside-bend-screen-space-shadows/",
+			"Linkage": "static",
+			"Copyright": [
+				"2023 Sony Interactive Entertainment"
 			]
 		}
 	]

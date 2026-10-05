@@ -3,7 +3,6 @@ using Sandbox.Audio;
 using Sandbox.Engine;
 using Sandbox.Engine.Settings;
 using Sandbox.Network;
-using Sandbox.Rendering;
 using Sandbox.TextureLoader;
 using Sandbox.UI;
 using Sandbox.Utility;
@@ -16,6 +15,11 @@ namespace Sandbox;
 internal static class EngineLoop
 {
 	static double previousTime;
+	static readonly FramePacer framePacer = new();
+
+	// Loop iterations vs frames that actually rendered. Native skips client output when it can't present.
+	internal static long LoopFrames;
+	internal static long RenderedFrames;
 
 	static Superluminal _runFrame = new Superluminal( "RunFrame", "#4d5e73" );
 	static Superluminal _frameStart = new Superluminal( "FrameStart", "#2c3541" );
@@ -25,14 +29,19 @@ internal static class EngineLoop
 	{
 		if ( Application.WantsExit )
 		{
+			SoundHandle.Shutdown();
+			MixingThread.DrainDisposals();
 			g_pEngineServiceMgr.ExitMainLoop();
 		}
+
+		LoopFrames++;
 
 		double time = RealTime.NowDouble;
 		FastTimer frameTimer = FastTimer.StartNew();
 
 		using ( _runFrame.Start() )
 		{
+			Application.FrameCount++;
 			RealTime.Update( time );
 			Time.Update( RealTime.Now, RealTime.Delta );
 
@@ -55,6 +64,21 @@ internal static class EngineLoop
 				wantsQuit = !EngineGlobal.SourceEngineFrame( appDict, time, previousTime );
 			}
 
+			if ( wantsQuit )
+			{
+				SoundHandle.Shutdown();
+				MixingThread.DrainDisposals();
+			}
+
+			try
+			{
+				GameWindow.Current?.ApplyPendingMode();
+			}
+			catch ( System.Exception e )
+			{
+				Log.Error( e );
+			}
+
 			try
 			{
 				using ( _frameEnd.Start() )
@@ -69,55 +93,26 @@ internal static class EngineLoop
 			}
 		}
 
-		SleepForFrameRateClamp( frameTimer );
+		PerformanceStats.Timings.Idle.AddMilliseconds( framePacer.Wait( FrameRateLimit.FramesPerSecond ) );
+		DebugOverlay.FrameTimeGraph.Sample( frameTimer.ElapsedMilliSeconds );
 
 		previousTime = time;
 	}
 
-	static Superluminal _sleepForFrameCap = new Superluminal( "Sleep For Max FPS", Color.Gray );
-
-	static double GetMaxFrameRate()
+	internal static FrameRateLimit FrameRateLimit
 	{
-		if ( Application.IsBenchmark ) return -1;
-		if ( Application.IsHeadless ) return 60;
-
-		int maxFps = RenderSettings.Instance.MaxFrameRate;
-
-		if ( InputSystem.IsAppActive() ) return maxFps;
-
-		// only use maxinactive if it's over 0 and lower than maxfps
-		int maxInactive = RenderSettings.Instance.MaxFrameRateInactive;
-		if ( maxInactive <= 0 ) return maxFps;
-		if ( maxInactive > maxFps ) return maxFps;
-
-		return maxInactive;
-	}
-
-	static void SleepForFrameRateClamp( FastTimer frameTime )
-	{
-		double maxFps = GetMaxFrameRate();
-		if ( maxFps <= 0 ) return;
-
-		using var inst = _sleepForFrameCap.Start();
-
-		double targetMilliseconds = 1000.0 / maxFps;
-		if ( targetMilliseconds > 100 ) targetMilliseconds = 100; // min is 10fps
-		if ( frameTime.ElapsedMilliSeconds >= targetMilliseconds ) return; // no sleep needed
-
-		var sleepMs = targetMilliseconds - frameTime.ElapsedMilliSeconds;
-
-		if ( sleepMs > 1.0 )
+		get
 		{
-			System.Threading.Thread.Sleep( (int)sleepMs );
-		}
+			if ( Application.IsBenchmark ) return new( -1, "benchmark" );
+			if ( Application.IsHeadless ) return new( 60, "headless" );
 
-		// sleep is inaccurate (to nearest 1ms, we call timeBeginPeriod in engine)
-		// so bleed off any residual fractions of a millisecond
-		while ( frameTime.ElapsedMilliSeconds < targetMilliseconds )
-		{
-			// wait
+			if ( GameSurface.Current is { } surface )
+			{
+				var vsync = surface.VSync;
+				return FrameRateLimit.FromSettings( WindowInput.IsAppActive(), vsync, vsync ? surface.RefreshRate : 0 );
+			}
+			return new( -1, "uncapped" );
 		}
-
 	}
 
 	/// <summary>
@@ -127,7 +122,7 @@ internal static class EngineLoop
 	{
 		using var __ = PerformanceStats.Timings.Input.Scope();
 
-		g_pInputService.Pump();
+		SdlEvents.Poll();
 	}
 
 	internal static void FrameStart()
@@ -226,7 +221,6 @@ internal static class EngineLoop
 		// Give each sound handle an opportunity to for a frame think
 		using ( PerformanceStats.Timings.Audio.Scope() )
 		{
-			SoundHandle.TickAll();
 			MixingThread.UpdateGlobals();
 		}
 
@@ -271,14 +265,8 @@ internal static class EngineLoop
 		//
 		VRSystem.FrameEnd();
 
-		//
-		// Free strings allocated by Interop shit, and let us know how many
-		//
-		int count = Interop.Free();
-		if ( count > 10 )
-		{
-			//log.Trace( $"Interop Free: {count}" );
-		}
+		// Free strings allocated by interop.
+		Interop.Free();
 
 		//
 		// Run threaded stuff that needed to
@@ -301,7 +289,7 @@ internal static class EngineLoop
 	}
 
 
-	static unsafe void UpdatePerformance()
+	static void UpdatePerformance()
 	{
 		PerformanceStats.Frame();
 		Api.Performance.Frame();
@@ -315,7 +303,6 @@ internal static class EngineLoop
 	{
 		ThreadSafe.AssertIsMainThread();
 		VideoTextureLoader.TickVideoPlayers();
-		TooltipSystem.Frame();
 		PanelRealTime.Update();
 
 		using ( _simulateUiGame.Start() )
@@ -329,96 +316,43 @@ internal static class EngineLoop
 		}
 	}
 
-	private static Logger nativeLogger = Logging.GetLogger( "Native" );
-
-	static string partial = "";
-
-	internal static void Print( int severity, string logger, string message )
-	{
-		partial += message;
-
-		if ( !partial.Contains( "\n" ) )
-			return;
-
-		if ( partial.EndsWith( '\n' ) )
-		{
-			message = partial;
-			partial = "";
-		}
-		else
-		{
-			var i = partial.LastIndexOf( '\n' );
-			message = partial.Substring( 0, i );
-			partial = partial.Substring( i );
-		}
-
-		message = message.TrimEnd( new[] { '\n', '\r' } );
-		NLog.LogLevel level = severity switch
-		{
-			0 => NLog.LogLevel.Info,
-			1 => NLog.LogLevel.Info,
-			2 => NLog.LogLevel.Warn,
-			3 => NLog.LogLevel.Warn,
-			4 => NLog.LogLevel.Error,
-			5 => NLog.LogLevel.Fatal,
-			_ => NLog.LogLevel.Info,
-		};
-
-		var logName = $"engine/{logger}";
-		nativeLogger.WriteToTargets( level, null, $"{message}", logName );
-	}
-
-	internal static void Print( bool debug, string message )
-	{
-		message = message.TrimEnd( new[] { '\n', '\r' } );
-
-		if ( debug )
-		{
-			nativeLogger.Trace( message );
-		}
-		else
-		{
-			nativeLogger.Info( message );
-		}
-	}
-
-	/// <summary>
-	/// A console command has arrived, or a convar has changed
-	/// </summary>
-	internal static void DispatchConsoleCommand( string name, string args, long flaglong )
-	{
-		var convar = ConVarSystem.Find( name );
-		if ( convar is null )
-		{
-			Log.Warning( $"Unknown Command: {name}" );
-			return;
-		}
-
-		convar.Run( args );
-	}
+	static Superluminal _clientOutput = new Superluminal( "OnClientOutput", "#3a6ea5" );
+	static Superluminal _toolsRender = new Superluminal( "Tools Render", "#6e6e3a" );
 
 	internal static void OnClientOutput()
 	{
+		RenderedFrames++;
+
+		using var _outputScope = _clientOutput.Start();
+
+		// Choose g_flTime before rendering, independently of temporary menu and preview scene scopes.
+		var renderTime = Game.IsPlaying && GlobalContext.Game.ActiveScene is { IsValid: true } gameScene
+			? (float)gameScene.TimeNow
+			: RealTime.Now;
+
+		CSceneSystem.SetNextRenderTime( renderTime );
+
+		// Flush envmaps in their own view scope before we do any view rendering
+		foreach ( var scene in Scene.All.Where( x => x.Active ) )
+			scene.RenderEnvmaps();
+
+		// r_managed_scene_compare renders to a bitmap, which has to happen before any views are rendering
+		Rendering.ManagedSceneRendering.BeforeRenderingViews();
+
+		// UI windows own their own swap chains, they're not part of anyone's view
+		Sandbox.UI.PanelWindows.FrameAll();
+
 		// The editor renders it's own game scene
 		if ( Application.IsEditor )
 		{
-			IToolsDll.Current?.OnRender();
+			Sandbox.UI.ScenePanel.RenderPending();
+
+			using ( _toolsRender.Start() )
+				IToolsDll.Current?.OnRender();
 			return;
 		}
 
-		var engineChain = g_pEngineServiceMgr.GetEngineSwapChain();
-
-		IGameInstanceDll.Current?.OnRender( engineChain );
-		IMenuDll.Current?.OnRender( engineChain );
-	}
-
-	/// <summary>
-	/// Called right at the end of a view being submitted, so everything CPU is done and it's handed off to the GPU.
-	/// This is also called for any dependent views.
-	/// </summary>
-	internal static void OnSceneViewSubmitted( ISceneView view )
-	{
-		RenderPipeline.OnSceneViewSubmitted( view );
+		GameWindow.Current?.Render();
 	}
 
 	static Channel<IDisposable> FrameEndDisposables = Channel.CreateUnbounded<IDisposable>();

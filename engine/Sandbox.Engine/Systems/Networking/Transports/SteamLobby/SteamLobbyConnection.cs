@@ -1,4 +1,4 @@
-﻿using NativeEngine;
+using NativeEngine;
 
 namespace Sandbox.Network;
 
@@ -8,10 +8,11 @@ namespace Sandbox.Network;
 internal unsafe class SteamLobbyConnection : Connection, IValid
 {
 	private readonly SteamLobbySocket Lobby;
+	internal Steamworks.Result? LastSendError { get; set; }
+	internal SteamSessionStatus? SessionFailure { get; set; }
+	bool _disposed;
 	public Friend Friend { get; private set; }
-	public bool IsValid => true;
-
-	public override bool IsHost => Lobby.HostSteamId == Friend.Id;
+	public bool IsValid => !_disposed;
 
 	public SteamLobbyConnection( SteamLobbySocket lobby, Friend steamId )
 	{
@@ -21,11 +22,11 @@ internal unsafe class SteamLobbyConnection : Connection, IValid
 
 	public void Dispose()
 	{
+		Close( 0, "Left lobby" );
 		State = ChannelState.Unconnected;
 	}
 
 	public string Description => "Steam Lobby Connection";
-	public override string Name => Friend.Name;
 
 	private RealTimeUntil timeUntilFetchStats;
 	private ConnectionStats cachedStats;
@@ -60,7 +61,7 @@ internal unsafe class SteamLobbyConnection : Connection, IValid
 	{
 		var steamFlags = flags.ToSteamFlags();
 		steamFlags |= 32; // k_nSteamNetworkingSend_AutoRestartBrokenSession
-		Lobby.SendMessage( Friend.Id, data, steamFlags );
+		Lobby.SendMessage( this, data, steamFlags );
 	}
 
 	internal override void InternalRecv( NetworkSystem.MessageHandler handler )
@@ -70,7 +71,13 @@ internal unsafe class SteamLobbyConnection : Connection, IValid
 
 	internal override void InternalClose( int closeCode, string closeReason )
 	{
-
+		lock ( Networking.NetworkThreadLock )
+		{
+			if ( _disposed ) return;
+			_disposed = true;
+			var net = Steam.SteamNetworkingMessages();
+			if ( net.IsValid ) net.CloseChannelWithUser( Friend.Id, Lobby.NetworkChannel );
+		}
 	}
 
 	internal void UpdateFromInfo( ConnectionInfo info )

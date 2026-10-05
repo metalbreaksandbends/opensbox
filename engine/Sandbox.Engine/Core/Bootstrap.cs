@@ -1,5 +1,4 @@
 ﻿using NativeEngine;
-using Sandbox.Engine.Settings;
 using Sandbox.Network;
 using Sandbox.Utility;
 using Sandbox.VR;
@@ -23,16 +22,25 @@ internal static class Bootstrap
 	internal static Api.Events.EventRecord StartupTiming;
 
 	/// <summary>
-	/// Called before anything else. This should set up any low level stuff that
-	/// might be relied on if static functions are called.
+	/// Set up application flags, the main thread and filesystems so the startup window can read its settings.
 	/// </summary>
-	internal static void PreInit( CMaterialSystem2AppSystemDict appDict )
+	internal static void InitApplication( CMaterialSystem2AppSystemDict appDict )
 	{
 		Application.Initialize( appDict.IsDedicatedServer(), appDict.IsConsoleApp(), appDict.IsInToolsMode(), appDict.IsInTestMode(), EngineGlobal.IsRetail() );
+		InitFileSystem( EngineGlobal.GetGameRootFolder() );
+	}
 
+	/// <summary>
+	/// Bootstrap managed services after the startup window has been painted.
+	/// </summary>
+	internal static void PreInit( Action initializeWindow = null )
+	{
 		try
 		{
-			InitMinimal( EngineGlobal.GetGameRootFolder() );
+			initializeWindow?.Invoke();
+			InitServices();
+			Graphics.Initialize();
+			GameWindow.Current?.UpdateStartupProgress( 0.1f );
 
 			DLLImportResolver.SetupResolvers();
 
@@ -56,7 +64,6 @@ internal static class Bootstrap
 			{
 				using var timerFs = StartupTiming?.ScopeTimer( "FilesystemInit" );
 
-				EngineFileSystem.InitializeAddonsFolder();
 				EngineFileSystem.InitializeDataFolder();
 
 				if ( !Application.IsStandalone )
@@ -71,6 +78,7 @@ internal static class Bootstrap
 			}
 
 			Api.Init();
+			GameWindow.Current?.UpdateStartupProgress( 0.2f );
 
 			if ( Application.IsStandalone )
 			{
@@ -93,11 +101,20 @@ internal static class Bootstrap
 
 				Mounting.Directory.LoadAssemblies();
 			}
+
+			GameWindow.Current?.UpdateStartupProgress( 0.4f );
 		}
 		catch ( Exception ex )
 		{
+			// Window creation can fail before services and the exception logger are initialized.
+			try
+			{
+				ErrorReporter.Initialize();
+				ErrorReporter.ReportException( ex );
+				ErrorReporter.Flush();
+			}
+			catch { }
 			Log.Error( ex );
-			ErrorReporter.Flush();
 			EngineGlobal.Plat_MessageBox( "Bootstrap::PreInit Error", $"Failed to bootstrap engine: {ex.Message}\n\n{ex.StackTrace}" );
 			try { NLog.LogManager.Shutdown(); } catch { }
 			EngineGlobal.Plat_ExitProcess( 1 );
@@ -141,6 +158,9 @@ internal static class Bootstrap
 	{
 		try
 		{
+			Material.Preload();
+			GameWindow.Current?.UpdateStartupProgress( 0.55f );
+
 			IToolsDll.Current?.Spin();
 
 #pragma warning disable CS0612 // Type or member is obsolete
@@ -160,6 +180,7 @@ internal static class Bootstrap
 
 			ReflectionUtility.RunAllStaticConstructors( "Sandbox.System" );
 			ReflectionUtility.RunAllStaticConstructors( "Sandbox.Engine" );
+			GameWindow.Current?.UpdateStartupProgress( 0.6f );
 
 			//log.Trace( "Bootstrap::Init" );
 			//log.Trace( $"Current Directory is {System.IO.Directory.GetCurrentDirectory()}" );
@@ -174,7 +195,14 @@ internal static class Bootstrap
 				SyncContext.RunBlocking( Project.InitializeBuiltIn() );
 			}
 
+			GameWindow.Current?.UpdateStartupProgress( 0.7f );
+
 			InitEngineConVars();
+			ConsoleConfig.ExecuteAutoexec();
+
+			// After registration, or the managed half of every quality profile is dropped on the
+			// floor and shadows and post-processing sit at their code defaults.
+			Settings.RenderSettings.Instance.ApplyQualityProfiles();
 
 			if ( IToolsDll.Current is not null )
 			{
@@ -189,6 +217,12 @@ internal static class Bootstrap
 
 			Screen.UpdateFromEngine();
 
+			// Not in RenderSettings' constructor: SystemInfo is only filled in at the tail of SourceEngineInit.
+			if ( Graphics.IsAvailable && !Application.IsEditor )
+			{
+				Settings.RenderSettings.Instance.EnsureFirstRunPreset();
+			}
+
 			if ( !Application.IsHeadless && !Application.IsStandalone )
 			{
 				// we really want the items available before we continue
@@ -198,17 +232,23 @@ internal static class Bootstrap
 				SyncContext.RunBlocking( Services.Inventory.WaitForSteamInventoryItems( timeout.Token ) );
 			}
 
+			GameWindow.Current?.UpdateStartupProgress( 0.8f );
+
 			if ( IMenuDll.Current is not null )
 			{
 				using var x = StartupTiming?.ScopeTimer( $"MenuBootstrap" );
 				SyncContext.RunBlocking( IMenuDll.Current.Initialize() );
 			}
 
+			GameWindow.Current?.UpdateStartupProgress( 0.9f );
+
 			if ( IGameInstanceDll.Current is not null )
 			{
 				using var x = StartupTiming?.ScopeTimer( $"IGameMenuDll Bootstrap" );
 				SyncContext.RunBlocking( IGameInstanceDll.Current.Initialize() );
 			}
+
+			GameWindow.Current?.UpdateStartupProgress( 0.95f );
 
 			if ( SteamClient.IsValid && ErrorReporter.IsUsingSentry )
 			{
@@ -235,6 +275,10 @@ internal static class Bootstrap
 				LoadingFinished();
 			}
 
+			// Steam starts us with a friend's "connect" rich presence when joining them from Steam
+			if ( CommandLine.HasSwitch( "+connect" ) )
+				Api.Activity.GameRequested( new( "invite" ) );
+
 			// Run any commands
 			foreach ( var sw in CommandLine.GetSwitches() )
 			{
@@ -256,6 +300,7 @@ internal static class Bootstrap
 
 			if ( Application.IsJoinLocal )
 			{
+				Api.Activity.GameRequested( new( "local" ) );
 				NetworkConsoleCommands.ConnectToServer( "local" );
 			}
 		}
@@ -281,10 +326,22 @@ internal static class Bootstrap
 
 	internal static void InitMinimal( string rootFolder )
 	{
-		Environment.CurrentDirectory = rootFolder;
+		InitFileSystem( rootFolder );
+		InitServices();
+	}
 
-		Sandbox.Utility.Steam.InitializeClient();
+	static void InitFileSystem( string rootFolder )
+	{
+		Environment.CurrentDirectory = rootFolder;
 		ThreadSafe.MarkMainThread();
+		EngineFileSystem.Initialize( rootFolder );
+		EngineFileSystem.InitializeConfigFolder();
+	}
+
+	static void InitServices()
+	{
+		if ( !Application.IsDedicatedServer )
+			Sandbox.Utility.Steam.InitializeClient();
 
 		ThreadPool.SetMinThreads( Environment.ProcessorCount, Environment.ProcessorCount );
 
@@ -292,9 +349,6 @@ internal static class Bootstrap
 		AppDomain.CurrentDomain.UnhandledException += ( _, args ) => Log.Error( args.ExceptionObject as Exception, "AppDomain unhandled exception" );
 
 		//System.Net.ServicePointManager.ServerCertificateValidationCallback += ( sender, cert, chain, sslPolicyErrors ) => true;
-
-		EngineFileSystem.Initialize( Environment.CurrentDirectory );
-		EngineFileSystem.InitializeConfigFolder();
 
 		if ( !Application.IsStandalone )
 		{
@@ -316,44 +370,7 @@ internal static class Bootstrap
 		}
 
 		if ( Application.IsBenchmark )
-		{
-			if ( !Api.IsConnected )
-			{
-				Log.Warning( "Not connected to backend - quitting." );
-				Environment.Exit( 10 );
-			}
-
-			RenderSettings.Instance.ApplySettingsForBenchmarks();
-
-			// Load First Benchmark package
-			if ( !TryLoadNextBenchmarkPackage() )
-			{
-				Console.WriteLine( "Quitting" );
-				ConVarSystem.Run( "quit" );
-			}
-		}
-	}
-
-	private readonly record struct BenchmarkPackage( string PackageName, Dictionary<string, string> GameSettings = null );
-
-	private static int _currentBenchmarkGameIndex = 0;
-
-	private static List<BenchmarkPackage> _benchmarkGames = new()
-	{
-		new BenchmarkPackage( "facepunch.benchmark" ),
-		new BenchmarkPackage( "facepunch.sbdm", new Dictionary<string, string> { { "sbdm.dev.benchmark", "1" } } ),
-	};
-
-	internal static bool TryLoadNextBenchmarkPackage()
-	{
-		if ( _currentBenchmarkGameIndex >= _benchmarkGames.Count ) return false;
-
-		var benchmarkGame = _benchmarkGames[_currentBenchmarkGameIndex];
-		LaunchArguments.GameSettings = benchmarkGame.GameSettings;
-		_ = IGameInstanceDll.Current.LoadGamePackageAsync( benchmarkGame.PackageName, GameLoadingFlags.Host, default );
-		_currentBenchmarkGameIndex++;
-
-		return true;
+			BenchmarkOrchestrator.InitFromCli();
 	}
 
 	static void InitEngineConVars()

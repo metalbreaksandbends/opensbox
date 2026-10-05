@@ -22,147 +22,87 @@ public sealed partial class SceneModel : SceneObject
 		return p.IsValid;
 	}
 
+	internal void SetAnimParameter( string name, AnimVariant value )
+	{
+		if ( !FindAnimParam( name, out var p ) )
+		{
+			return;
+		}
+
+		var dstType = p.GetParameterType();
+
+		if ( !value.TryConvertTo( dstType, out var converted ) )
+		{
+			Log.Warning( $"SetAnimParameter( \"{name}\" ): can't convert from {value.Type} to {dstType}." );
+			return;
+		}
+
+		p.SetValue( converted );
+	}
+
+	internal AnimVariant GetAnimParameter( string name )
+	{
+		if ( !FindAnimParam( name, out var p ) )
+		{
+			return default;
+		}
+
+		return p.GetValue();
+	}
+
 	/// <summary>
 	/// Sets a boolean animation graph parameter by name.
 	/// </summary>
-	public void SetAnimParameter( string name, bool value )
-	{
-		if ( FindAnimParam( name, out var p ) )
-		{
-			var t = p.GetParameterType();
+	public void SetAnimParameter( string name, bool value ) => SetAnimParameter( name, (AnimVariant)value );
 
-			if ( t == AnimParamType.Bool )
-			{
-				p.SetValue( value );
-				return;
-			}
-
-			if ( t == AnimParamType.Int )
-			{
-				p.SetValue( value ? 1 : 0 );
-				return;
-			}
-
-			if ( t == AnimParamType.Float )
-			{
-				p.SetValue( value ? 1.0f : 0.0f );
-				return;
-			}
-
-			Log.Warning( $"SetBool: {t}" );
-		}
-	}
+	/// <summary>
+	/// Sets an integer animation graph parameter by name.
+	/// </summary>
+	public void SetAnimParameter( string name, int value ) => SetAnimParameter( name, (AnimVariant)value );
 
 	/// <summary>
 	/// Sets a float animation graph parameter by name.
 	/// </summary>
-	public void SetAnimParameter( string name, float value )
-	{
-		if ( FindAnimParam( name, out var p ) )
-		{
-			var t = p.GetParameterType();
-
-			if ( t == AnimParamType.Bool )
-			{
-				p.SetValue( value.AlmostEqual( 0.0f ) );
-				return;
-			}
-
-			if ( t == AnimParamType.Float )
-			{
-				p.SetValue( value );
-				return;
-			}
-
-			if ( t == AnimParamType.Int )
-			{
-				p.SetValue( (int)value );
-				return;
-			}
-
-			if ( t == AnimParamType.Enum )
-			{
-				p.SetEnumValue( (int)value );
-				return;
-			}
-
-			Log.Warning( $"SetBool: {t}" );
-		}
-	}
+	public void SetAnimParameter( string name, float value ) => SetAnimParameter( name, (AnimVariant)value );
 
 	/// <summary>
 	/// Sets a vector animation graph parameter by name.
 	/// </summary>
-	public void SetAnimParameter( string name, Vector3 value )
-	{
-		if ( FindAnimParam( name, out var p ) )
-		{
-			var t = p.GetParameterType();
-
-			if ( t == AnimParamType.Vector )
-			{
-				p.SetValue( value );
-				return;
-			}
-
-			Log.Warning( $"SetBool: {t}" );
-		}
-	}
-
-	/// <summary>
-	/// Sets a integer animation graph parameter by name.
-	/// </summary>
-	public void SetAnimParameter( string name, int value )
-	{
-		if ( FindAnimParam( name, out var p ) )
-		{
-			var t = p.GetParameterType();
-
-			if ( t == AnimParamType.Bool )
-			{
-				p.SetValue( value == 0 );
-				return;
-			}
-
-			if ( t == AnimParamType.Float )
-			{
-				p.SetValue( (float)value );
-				return;
-			}
-
-			if ( t == AnimParamType.Int )
-			{
-				p.SetValue( value );
-				return;
-			}
-
-			if ( t == AnimParamType.Enum )
-			{
-				p.SetEnumValue( value );
-				return;
-			}
-
-			Log.Warning( $"Set int: {t}" );
-		}
-	}
+	public void SetAnimParameter( string name, Vector3 value ) => SetAnimParameter( name, (AnimVariant)value );
 
 	/// <summary>
 	/// Sets a rotation animation graph parameter by name.
 	/// </summary>
-	public void SetAnimParameter( string name, Rotation value )
+	public void SetAnimParameter( string name, Rotation value ) => SetAnimParameter( name, (AnimVariant)value );
+
+	/// <summary>
+	/// Sets an enum animation graph parameter by option name (e.g. "pistol" on "holdtype").
+	/// </summary>
+	public bool SetAnimParameter( string name, string option )
 	{
-		if ( FindAnimParam( name, out var p ) )
+		if ( !FindAnimParam( name, out var p ) )
+			return false;
+
+		var t = p.GetParameterType();
+
+		if ( t != AnimParamType.Enum )
 		{
-			var t = p.GetParameterType();
-
-			if ( t == AnimParamType.Rotation )
-			{
-				p.SetValue( value );
-				return;
-			}
-
-			Log.Warning( $"Set rot: {t}" );
+			Log.Warning( $"SetAnimParameter( \"{name}\" ): not an enum parameter." );
+			return false;
 		}
+
+		if ( !AnimationGraph.TryGetEnumOptionIndex( name, option, out var index ) )
+		{
+			Log.Warning( $"SetAnimParameter( \"{name}\" ): no enum option \"{option}\"" );
+			return false;
+		}
+
+		AnimVariant value = (byte)index;
+
+		Assert.AreEqual( t, value.Type );
+
+		p.SetValue( value );
+		return true;
 	}
 
 	/// <summary>
@@ -176,26 +116,26 @@ public sealed partial class SceneModel : SceneObject
 	/// <summary>
 	/// Get an animated parameter
 	/// </summary>
-	public Rotation GetRotation( string name ) => animNative.GetParameterRotation( name );
+	public bool GetBool( string name ) => GetAnimParameter( name ).TryConvertTo( AnimParamType.Bool, out var result ) && (bool)result;
 
 	/// <summary>
 	/// Get an animated parameter
 	/// </summary>
-	public Vector3 GetVector3( string name ) => animNative.GetParameterVector3( name );
+	public int GetInt( string name ) => GetAnimParameter( name ).TryConvertTo( AnimParamType.Int, out var result ) ? (int)result : 0;
 
 	/// <summary>
 	/// Get an animated parameter
 	/// </summary>
-	public bool GetBool( string name ) => animNative.GetParameterInt( name ) != 0;
+	public float GetFloat( string name ) => GetAnimParameter( name ).TryConvertTo( AnimParamType.Float, out var result ) ? (float)result : 0f;
 
 	/// <summary>
 	/// Get an animated parameter
 	/// </summary>
-	public float GetFloat( string name ) => animNative.GetParameterFloat( name );
+	public Vector3 GetVector3( string name ) => GetAnimParameter( name ).TryConvertTo( AnimParamType.Vector, out var result ) ? (Vector3)result : Vector3.Zero;
 
 	/// <summary>
 	/// Get an animated parameter
 	/// </summary>
-	public int GetInt( string name ) => animNative.GetParameterInt( name );
+	public Rotation GetRotation( string name ) => GetAnimParameter( name ).TryConvertTo( AnimParamType.Rotation, out var result ) ? (Rotation)result : Rotation.Identity;
 
 }

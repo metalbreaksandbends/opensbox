@@ -7,6 +7,8 @@
 // I don't know
 ;
 
+#include "common/utils/MSAAUtils.hlsl"
+
 // don't have more than this for fucks sake
 #define MAX_CASCADE_COUNT 4
 
@@ -19,14 +21,16 @@ cbuffer DirectionalLightCB
 	uint4 g_DirectionalLightShadowMapTextureIndex;
 	uint g_DirectionalLightCascadeCount;
     float g_DirectionalLightInverseShadowMapSize;
-	float g_DirectionalLightPadding;
+	// Bindless index of the screen-space (contact) shadow mask, 0 if none.
+	uint g_DirectionalLightScreenSpaceShadowIndex;
 	bool g_DirectionalLightEnabled;
     float4 g_DirectionalLightCascadeHardness;
     float4 g_DirectionalLightCascadeSpheres[MAX_CASCADE_COUNT]; // xyz = world center, w = radius squared
     float4 g_DirectionalLightShadowBias; // per-cascade depth bias, scaled by cascade size
 };
 
-int DirectionalLightDebug < Attribute( "DirectionalLightDebug" ); >;
+int DirectionalLightDebug < Attribute("DirectionalLightDebug"); >;
+bool DisableScreenSpaceShadows < Attribute("DisableScreenSpaceShadows" ); Default( 0 ); > ;
 
 static const float3 DebugColors[4] = {
     float3( 1.0f, 0.0f, 0.0f ),
@@ -54,11 +58,14 @@ int FindCascade( float3 worldPosition, out float3 posLs )
 	return -1;
 }
 
-class DirectionalLightShadow
+struct DirectionalLightShadow
 {
-	static float SampleCascade( int cascadeIndex, float3 worldPosition, float2 screenPos )
+	static float SampleCascade( int cascadeIndex, float3 worldPosition, float3 normalWs, float2 screenPos )
     {
 		float4x4 worldToShadow = g_DirectionalLightWorldToShadowViewMatrices[cascadeIndex];
+
+		worldPosition = ApplyShadowNormalOffset( worldPosition, normalWs, g_DirectionalLightInverseShadowMapSize / length( worldToShadow[0].xyz ), g_DirectionalLightCascadeHardness[cascadeIndex] );
+		
 		float3 positionLs = mul( worldToShadow, float4( worldPosition, 1.0f ) ).xyz;
 
         ShadowPCFInput pcfInput;
@@ -69,8 +76,40 @@ class DirectionalLightShadow
 		pcfInput.Hardness = g_DirectionalLightCascadeHardness[cascadeIndex];
         pcfInput.ScreenPos = screenPos;
 
+#ifndef FORCE_BILINEAR_PCF_SHADOWS_ONLY
+        if ( UserShadowFilterQuality >= 3 )
+            return SampleDirectionalShadowTent16( pcfInput );
+#endif
         return SampleShadowPCF( pcfInput );
     }
+
+    // For callers that have no receiver normal at hand. The normal comes from screen-space derivatives,
+    // so this is only valid in uniform control flow - from inside a per-light loop, use the overload above.
+    static float SampleCascade( int cascadeIndex, float3 worldPosition, float2 screenPos )
+    {
+        return SampleCascade( cascadeIndex, worldPosition, ComputeShadowReceiverNormal( worldPosition ), screenPos );
+    }
+
+	// Screen-space (contact) shadows precomputed into a full-screen mask by the ScreenSpaceShadows
+	// component. 1 = lit, 0 = shadowed. Returns 1 (no occlusion) when no mask is bound (index 0).
+	// The mask is a non-MSAA full-res texture, so composite it with MSAAUtils::GetSampleIndex to pick
+	// the depth-matching gather lane - this keeps the mask pixel-perfect under MSAA.
+	static float SampleScreenSpaceShadow( float4 vPositionSs )
+	{
+		#if ( S_TRANSLUCENT == 1 || PROGRAM != VFX_PROGRAM_PS )
+        	return 1.0f;
+		#endif
+
+		if ( DisableScreenSpaceShadows )
+			return 1.0f;
+		
+		if ( g_DirectionalLightScreenSpaceShadowIndex == 0 )
+			return 1.0f;
+
+        Texture2D tMask = Bindless::GetTexture2D(g_DirectionalLightScreenSpaceShadowIndex);
+        vPositionSs.xy -= g_vViewportOffset.xy;
+		return MSAAUtils::SampleRed( tMask, vPositionSs );
+	}
 
 	static float3 GetOccludedPosition( float3 fragPos )
     {
@@ -94,19 +133,30 @@ class DirectionalLightShadow
         return fragPos + zGrad * max( s - posLs.z, 0.0f ) / dot( zGrad, zGrad );
     }
 
-    static float GetVisibility( float3 worldPosition, float2 screenPos )
+    static float GetVisibility( float3 worldPosition, float3 normalWs, float4 vPositionSs )
     {
+        float ssShadow = SampleScreenSpaceShadow( vPositionSs );
+
         if ( g_DirectionalLightCascadeCount == 0 )
-            return 1.0f;
+            return ssShadow;
 
 		float3 posLs;
 		int cascade = FindCascade( worldPosition, posLs );
 
 		if ( cascade < 0 )
-			return 1.0f;
+			return ssShadow;
 
-		return SampleCascade( cascade, worldPosition, screenPos );
+		return SampleCascade( cascade, worldPosition, normalWs, vPositionSs.xy ) * ssShadow;
     }
+
+    // For callers that have no receiver normal at hand. The normal comes from screen-space derivatives,
+    // so this is only valid in uniform control flow - from inside a per-light loop, use the overload above.
+    static float GetVisibility( float3 worldPosition, float4 vPositionSs )
+    {
+        return GetVisibility( worldPosition, ComputeShadowReceiverNormal( worldPosition ), vPositionSs );
+    }
+
+
 
     static float3 GetDebugColor( float3 worldPosition )
     {

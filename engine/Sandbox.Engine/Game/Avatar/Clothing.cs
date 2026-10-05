@@ -5,7 +5,7 @@ namespace Sandbox;
 /// <summary>
 /// Describes an item of clothing and implicitly which other items it can be worn with
 /// </summary>
-[AssetType( Name = "Clothing Definition", Extension = "clothing", Category = "citizen", Flags = AssetTypeFlags.IncludeThumbnails )]
+[AssetType( Name = "Clothing Definition", Extension = "clothing", Category = "citizen", Flags = AssetTypeFlags.IncludeThumbnails, IconColor = "#fdea60" )]
 public sealed partial class Clothing : GameResource
 {
 
@@ -211,6 +211,13 @@ public sealed partial class Clothing : GameResource
 	[BitFlags]
 	[Category( "Clothing Setup" )]
 	public BodyGroups HideBody { get; set; }
+
+	/// <summary>
+	/// How this clothing responds to the avatar's body deforms. Normal reshapes it, None ignores them, and Rigid moves it
+	/// without reshaping it, for hard items like earrings or a sword.
+	/// </summary>
+	[Category( "Clothing Setup" )]
+	public SkinnedModelRenderer.DeformationModeType DeformationMode { get; set; } = SkinnedModelRenderer.DeformationModeType.Normal;
 
 	[Category( "User Customization" )]
 	public bool AllowTintSelect { get; set; }

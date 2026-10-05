@@ -8,11 +8,11 @@ public partial class Scene : GameObject
 	[ActionGraphIgnore]
 	public SceneTrace Trace => new SceneTrace( this );
 
+	[ThreadStatic] static List<PhysicsTraceResult> _physicsTraceScratch;
+
 	internal IEnumerable<SceneTraceResult> RunTraceAll( SceneTrace trace )
 	{
 		SceneMetrics.RayTraceAll++;
-
-		List<SceneTraceResult> results = new List<SceneTraceResult>();
 
 		if ( trace.NeedsFilterCallback )
 		{
@@ -20,10 +20,21 @@ public partial class Scene : GameObject
 			trace.PhysicsTrace.filterCallback = SceneTrace.PhysicsFilterCallback;
 		}
 
+		List<PhysicsTraceResult> physicsResults = null;
+
 		if ( trace.IncludePhysicsWorld )
 		{
-			var physicsResults = trace.PhysicsTrace.RunAll();
+			physicsResults = _physicsTraceScratch ??= new List<PhysicsTraceResult>();
+			physicsResults.Clear();
+			trace.PhysicsTrace.RunAll( physicsResults );
+		}
 
+		// Sized up front. Physics hits are usually all of them, and growing from empty reallocates the backing
+		// array several times per trace.
+		var results = new List<SceneTraceResult>( physicsResults?.Count ?? 0 );
+
+		if ( physicsResults is not null )
+		{
 			foreach ( var result in physicsResults )
 			{
 				var sceneResult = SceneTraceResult.From( this, result );
@@ -55,7 +66,8 @@ public partial class Scene : GameObject
 		}
 
 		SceneTrace.ClearTraceFilter();
-		return results.OrderBy( r => r.Fraction );
+		results.Sort( static ( a, b ) => a.Fraction.CompareTo( b.Fraction ) );
+		return results;
 	}
 
 	internal unsafe SceneTraceResult RunTrace( SceneTrace trace )
@@ -127,61 +139,25 @@ public partial class Scene : GameObject
 	/// Find game objects in a sphere using physics.
 	/// </summary>
 	public IEnumerable<GameObject> FindInPhysics( Sphere sphere )
-	{
-		var results = CQueryResult.Create();
-		PhysicsWorld.native.Query( results, sphere.Center, sphere.Radius, 0x07 );
-		return FilterQueryResults( results );
-	}
+		=> PhysicsWorld.FindInPhysics( sphere );
 
 	/// <summary>
 	/// Find game objects in a box using physics.
 	/// </summary>
 	public IEnumerable<GameObject> FindInPhysics( BBox box )
-	{
-		var results = CQueryResult.Create();
-		PhysicsWorld.native.Query( results, box, 0x07 );
-		return FilterQueryResults( results );
-	}
+		=> PhysicsWorld.FindInPhysics( box );
 
 	/// <summary>
 	/// Find game objects in a frustum using physics.
 	/// </summary>
-	public unsafe IEnumerable<GameObject> FindInPhysics( Frustum frustum )
-	{
-		var corners = stackalloc Vector3[8];
-		if ( !frustum.TryGetCorners( corners ) )
-			return Enumerable.Empty<GameObject>();
+	public IEnumerable<GameObject> FindInPhysics( Frustum frustum )
+		=> PhysicsWorld.FindInPhysics( frustum );
 
-		var results = CQueryResult.Create();
-		PhysicsWorld.native.Query( results, (IntPtr)corners, 8, 0x07 );
-		return FilterQueryResults( results );
-	}
-
-	private HashSet<GameObject> FilterQueryResults( CQueryResult results )
-	{
-		var gameObjects = new HashSet<GameObject>();
-		int count = results.Count();
-		for ( int i = 0; i < count; ++i )
-		{
-			var shape = results.Element( i );
-			if ( !shape.IsValid() )
-				continue;
-
-			var body = shape.Body;
-			if ( !body.IsValid() )
-				continue;
-
-			var gameObject = body.GameObject;
-			if ( !gameObject.IsValid() )
-				continue;
-
-			gameObjects.Add( gameObject );
-		}
-
-		results.DeleteThis();
-
-		return gameObjects;
-	}
+	/// <summary>
+	/// Find physics bodies overlapping a sphere, writing into a caller-provided span.
+	/// </summary>
+	internal int FindBodiesInPhysics( Vector3 center, float radius, Span<PhysicsBody> result )
+		=> PhysicsWorld?._world?.FindBodiesInPhysics( center, radius, result ) ?? 0;
 }
 
 [Expose, ActionGraphIgnore]
@@ -546,7 +522,7 @@ public partial struct SceneTrace
 	{
 		if ( !Application.IsEditor )
 		{
-			Log.Error( "UseRenderMeshes is only available in edito" );
+			Log.Error( "UseRenderMeshes is only available in editor" );
 			return this;
 		}
 		var t = this;
@@ -563,7 +539,7 @@ public partial struct SceneTrace
 	{
 		if ( !Application.IsEditor )
 		{
-			Log.Error( "UseRenderMeshes is only available in edito" );
+			Log.Error( "UseRenderMeshes is only available in editor" );
 			return this;
 		}
 		var t = this;

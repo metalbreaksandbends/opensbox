@@ -18,7 +18,7 @@ public partial class Shader : Resource
 
 		this.native = native;
 
-		RegisterWeakResourceId( name );
+		RegisterWeakResourceId( name, native.GetGuid() );
 	}
 
 	internal Shader()
@@ -57,6 +57,14 @@ public partial class Shader : Resource
 	internal bool LoadFromCompiled( string filename )
 	{
 		return native.CreateFromResourceFile( filename, NativeEngine.VfxCompileTarget_t.SM_6_0_VULKAN, VFX_CHECK_MD5_AGAINST_SOURCE | VFX_LOAD_STATIC_COMBO_DATA, true );
+	}
+
+	/// <summary>
+	/// Loads the shader from an already-compiled <c>.shader_c</c> so it can be recompiled, WITHOUT loading the per-static-combo compiled data.
+	/// </summary>
+	internal bool LoadCompiledForRecompile( string filename )
+	{
+		return native.CreateFromResourceFile( filename, NativeEngine.VfxCompileTarget_t.SM_6_0_VULKAN, 0, true );
 	}
 
 	/// <summary>

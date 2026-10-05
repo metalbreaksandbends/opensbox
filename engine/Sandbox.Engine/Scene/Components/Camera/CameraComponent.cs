@@ -1,4 +1,5 @@
 ﻿
+using Sandbox.Engine;
 using Sandbox.Rendering;
 using Sandbox.UI;
 using System.Drawing;
@@ -143,17 +144,16 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 	/// <summary>
 	/// Since we are rendering to a texture, better to generate mipmaps for it.
 	/// </summary>
-	private CommandList _renderTextureMipGenCommandList
+	private CommandList _renderTextureMipGenCommandList;
+
+	private CommandList CreateRenderTextureMipGenCommandList()
 	{
-		get
-		{
-			var cmd = new CommandList( "Generate MipMaps For RenderTexture" );
+		var cmd = new CommandList( "Generate MipMaps For RenderTexture" );
 
-			if ( RenderTexture != null && RenderTexture.Texture != null && RenderTexture.Texture.Mips > 1 )
-				cmd.GenerateMipMaps( RenderTexture.Texture );
+		if ( RenderTexture != null && RenderTexture.Texture != null && RenderTexture.Texture.Mips > 1 )
+			cmd.GenerateMipMaps( RenderTexture.Texture );
 
-			return cmd;
-		}
+		return cmd;
 	}
 
 	private Texture _renderTarget;
@@ -227,6 +227,9 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 		sceneCamera = new( GameObject.Name );
 
 		sceneCamera.OnRenderStageHook = ExecuteCommandLists;
+		sceneCamera.WantsDepthNormalsHook = WantsDepthNormals;
+		sceneCamera.HasAsyncComputeHook = HasAsyncCompute;
+		sceneCamera.RenderAsyncComputeHook = RenderAsyncCompute;
 	}
 
 	protected override void OnAwake()
@@ -238,6 +241,7 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 	protected override void OnDestroy()
 	{
 		Scene.Cameras.Remove( this );
+		Rendering.ManagedSceneRendering.Forget( this );
 		sceneCamera?.Dispose();
 		sceneCamera = null;
 	}
@@ -259,21 +263,119 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 		Gizmo.Draw.LineFrustum( frustum );
 	}
 
+	/// <summary>
+	/// The view this camera composed this frame - the base transform reshaped by every
+	/// <see cref="ICameraModifier"/>, before transient render effects. Query
+	/// <see cref="CameraView.FieldOfView"/> from here for zoom-aware logic like scaling look
+	/// sensitivity while scoped. Final from the camera stage of the tick (after Update, before
+	/// PreRender) - reading it during Update gives the previous frame's composition.
+	/// </summary>
+	public CameraView View { get; private set; }
+
+	bool _composed;
+	CameraView _composedBase;
+	CameraView _renderView;
+
+	/// <summary>
+	/// Compose this camera's view - the base transform reshaped by every <see cref="ICameraModifier"/>
+	/// (published on <see cref="View"/>), then transient effects baked on top for the render. The
+	/// scene composes every camera once per tick, after Update and bone merging and before PreRender,
+	/// so anything in PreRender positions against a settled camera. Call it yourself only when you're rendering
+	/// without ticking the scene and want the composition - otherwise a camera moved after composing
+	/// just renders from its raw transform.
+	/// </summary>
+	public void ComposeView()
+	{
+		ComposeView( Scene.IsEditor ? null : GatherModifiers( Scene ) );
+	}
+
+	// The scene-wide modifier set, sorted - gathered once per tick and shared by every camera
+	// composing that tick (see Scene.UpdateCameraViews). Null when modifiers don't apply (editor).
+	internal static ICameraModifier[] GatherModifiers( Scene scene )
+		=> scene.GetAll<ICameraModifier>().OrderBy( x => x.CameraOrder ).ToArray();
+
+	internal void ComposeView( ICameraModifier[] modifiers )
+	{
+		var view = RawView;
+
+		// The modifier chain reshapes the view in order (scope zoom, vehicle roll), then gets the
+		// final view to place things against (view models).
+		if ( modifiers is not null )
+		{
+			foreach ( var modifier in modifiers )
+			{
+				modifier.ModifyCamera( this, ref view );
+			}
+
+			View = view;
+
+			foreach ( var modifier in modifiers )
+			{
+				modifier.PostCameraSetup( this, view );
+			}
+		}
+		else
+		{
+			View = view;
+		}
+
+		_renderView = view;
+
+		// Transient camera effects (screen shake, punches) bake into the render view only - the
+		// composed view and component transform are never touched, so they can't accumulate or move
+		// the player's aim.
+		if ( CameraEffectSystem.Get( Scene ) is { } effects )
+		{
+			effects.QueryOffsets( this, out var shakeOffset, out var shakeAngles, out var shakeFov );
+
+			_renderView.Position += _renderView.Rotation * shakeOffset;
+			_renderView.Rotation *= shakeAngles;
+			_renderView.FieldOfView = (_renderView.FieldOfView + shakeFov).Clamp( 1f, 179f );
+		}
+
+		// What the component looked like when composition finished. A camera changed after this
+		// stomps the composition (see UpdateSceneCameraTransform).
+		_composedBase = RawView;
+
+		_composed = true;
+	}
+
+	// The camera's own values, untouched by modifiers or effects.
+	CameraView RawView => new()
+	{
+		Position = WorldPosition,
+		Rotation = WorldRotation,
+		FieldOfView = FieldOfView,
+		ZNear = ZNear,
+		ZFar = ZFar
+	};
+
 	internal void UpdateSceneCameraTransform( SceneCamera camera )
 	{
-		camera.Position = WorldPosition;
-		camera.Rotation = WorldRotation;
-		camera.ZNear = ZNear;
-		camera.ZFar = ZFar;
+		// The view composes once, at the camera stage of the tick - that's the only time modifiers
+		// and effects apply. A camera that never composed, or was changed since composing (tools,
+		// paused scenes, moviemakers - place a camera, render, done), stomps the composition and
+		// renders from its raw values.
+		var raw = RawView;
+
+		if ( !_composed || raw != _composedBase )
+		{
+			_renderView = raw;
+		}
+
+		camera.Position = _renderView.Position;
+		camera.Rotation = _renderView.Rotation;
+		camera.ZNear = _renderView.ZNear;
+		camera.ZFar = _renderView.ZFar;
 		camera.Rect = new Rect( Viewport.x, Viewport.y, Viewport.z, Viewport.w );
 		camera.Size = ScreenRect.Size;
 		camera.Ortho = Orthographic;
 		camera.OrthoHeight = OrthographicHeight;
 
-		if ( FovAxis == Axis.Vertical )
-			camera.FieldOfView = Screen.CreateVerticalFieldOfView( FieldOfView );
+		if ( FovAxis == Axis.Vertical && ScreenRect.Height > 0 )
+			camera.FieldOfView = Screen.CreateVerticalFieldOfView( _renderView.FieldOfView, ScreenRect.Width / ScreenRect.Height );
 		else
-			camera.FieldOfView = FieldOfView;
+			camera.FieldOfView = _renderView.FieldOfView;
 	}
 
 	internal void UpdateSceneCameraStereo( SceneCamera camera )
@@ -285,6 +387,11 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 	/// <summary>
 	/// Update a SceneCamera with the settings from this component
 	/// </summary>
+	Action<Stage, SceneCamera> executeCommandListsHook;
+	Func<bool> wantsDepthNormalsHook;
+	Func<Stage, bool> hasAsyncComputeHook;
+	Action<Stage> renderAsyncComputeHook;
+
 	public void UpdateSceneCamera( SceneCamera camera, bool includeTags = true )
 	{
 		if ( Scene is null )
@@ -341,30 +448,30 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 		// Also don't hook into render overlays, nor volumetric fog stuff.
 		if ( ClearFlags.Contains( ClearFlags.Color ) )
 		{
-			camera.VolumetricFog.Enabled = Scene.GetAllComponents<VolumetricFogVolume>().Count() > 0;
+			camera.VolumetricFog.Enabled = Scene.Get<VolumetricFogVolume>() is not null;
 			camera.VolumetricFog.DrawDistance = 4096;
 			camera.VolumetricFog.FadeInStart = 64;
 			camera.VolumetricFog.FadeInEnd = 256;
 			camera.VolumetricFog.IndirectStrength = 1.0f;
 			camera.VolumetricFog.Anisotropy = 1;
 			camera.VolumetricFog.Scattering = 1.0f;
-			camera.VolumetricFog.BakedIndirectTexture = Scene.GetAllComponents<VolumetricFogController>().FirstOrDefault()?.BakedFogTexture;
+			camera.VolumetricFog.BakedIndirectTexture = Scene.Get<VolumetricFogController>()?.BakedFogTexture;
 		}
 
-#pragma warning disable CS0612
-		GameObject.RunEvent<ISceneCameraSetup>( x => x.SetupCamera( this, camera ) );
-#pragma warning restore CS0612
-
 		//
-		// Child camera executes command lists from this camera
+		// Child camera executes command lists from this camera. The delegates are made once: this runs every frame, and a
+		// method group assigned here allocated a delegate each time
 		//
-		camera.OnRenderStageHook = ExecuteCommandLists;
+		camera.OnRenderStageHook = executeCommandListsHook ??= ExecuteCommandLists;
+		camera.WantsDepthNormalsHook = wantsDepthNormalsHook ??= WantsDepthNormals;
+		camera.HasAsyncComputeHook = hasAsyncComputeHook ??= HasAsyncCompute;
+		camera.RenderAsyncComputeHook = renderAsyncComputeHook ??= RenderAsyncCompute;
 
 		//
 		// Hack because I don't want this to have to be on a camera. This
 		// is hidden from users, so we'll figure out how to square it later
 		//
-		foreach ( var cubemapFog in Scene.GetAllComponents<CubemapFog>() )
+		foreach ( var cubemapFog in Scene.Query<CubemapFog>() )
 		{
 			if ( cubemapFog.Tags.HasAny( RenderExcludeTags ) )
 				continue;
@@ -381,7 +488,8 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 		if ( Scene is null )
 			return;
 
-		camera.OnRenderUI = () => OnCameraRenderUI( camera );
+		camera.OnRenderUI = () => OnCameraRenderUI( camera, ScreenPanel.RenderTiming.AfterPostProcess );
+		camera.OnRenderUIBeforePostProcess = () => OnCameraRenderUI( camera, ScreenPanel.RenderTiming.BeforePostProcess );
 	}
 
 	[Obsolete( "Use CommandList" )]
@@ -405,29 +513,43 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 	[Obsolete( "Use CommandList" )]
 	public IDisposable AddHookAfterUI( string debugName, int order, Action<SceneCamera> renderEffect ) => null;
 
-	private void OnCameraRenderUI( SceneCamera camera )
+	/// <summary>
+	/// Anything to draw at <see cref="Stage.EarlyUI"/>? The pipeline skips that layer's passes otherwise.
+	/// </summary>
+	private bool HasEarlyUI()
+	{
+		lock ( _commandListLock )
+		{
+			if ( commandlists.TryGetValue( Stage.EarlyUI, out var list ) && list.Count > 0 )
+				return true;
+		}
+
+		foreach ( var c in Scene.renderScreenPanels )
+		{
+			if ( c.Active && c.Timing == ScreenPanel.RenderTiming.BeforePostProcess && (c.TargetCamera ?? (IsMainCamera ? this : null)) == this )
+				return true;
+		}
+
+		return false;
+	}
+
+	private void OnCameraRenderUI( SceneCamera camera, ScreenPanel.RenderTiming timing )
 	{
 		if ( Scene is null )
 			return;
 
-		foreach ( var c in Scene.GetAll<ScreenPanel>().OrderBy( x => x.ZIndex ) )
+		// Runs on the render thread, so iterate the snapshot PreRender() took rather than
+		// the live object index - walking that while the main thread edits it blows up.
+		foreach ( var c in Scene.renderScreenPanels )
 		{
 			if ( !c.Active ) continue;
+			if ( c.Timing != timing ) continue;
 			var target = c.TargetCamera ?? (IsMainCamera ? this : null);
 			if ( target != this ) continue;
 			if ( RenderExcludeTags.HasAny( c.GameObject.Tags ) ) continue;
 
 			c.Render();
 		}
-	}
-
-	/// <summary>
-	/// Obsolete 02/10/2025
-	/// </summary>
-	[Obsolete]
-	public interface ISceneCameraSetup
-	{
-		void SetupCamera( CameraComponent camera, SceneCamera sceneCamera );
 	}
 
 	internal bool IsSceneEditorCamera;
@@ -450,6 +572,7 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 
 			UpdateSceneCameraUI( sceneCamera );
 			sceneCamera.RenderUI = renderUI;
+			sceneCamera.Attributes.Set( "enableEarlyUI", HasEarlyUI() );
 			UpdateSceneCameraStereo( sceneCamera );
 		}
 	}
@@ -469,6 +592,10 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 		using ( Scene.Push() )
 		{
 			InitializeRendering();
+
+			// r_managed_scene: the managed scene renderer takes the whole frame
+			if ( Rendering.ManagedSceneRendering.TryRender( this, swapChain, CustomSize ?? size ) )
+				return;
 
 			if ( RenderTarget is not null && RenderTarget.native.IsValid )
 			{
@@ -606,7 +733,10 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 		AddCommandList( _overlayCommandList, Rendering.Stage.AfterUI, 5000 );
 
 		if ( RenderTexture is not null )
+		{
+			_renderTextureMipGenCommandList = CreateRenderTextureMipGenCommandList();
 			AddCommandList( _renderTextureMipGenCommandList, Rendering.Stage.AfterPostProcess, 10000 );
+		}
 	}
 
 	protected override void OnDisabled()
@@ -615,7 +745,12 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 
 		RemoveCommandList( _hudCommandList );
 		RemoveCommandList( _overlayCommandList );
-		RemoveCommandList( _renderTextureMipGenCommandList );
+
+		if ( _renderTextureMipGenCommandList is not null )
+		{
+			RemoveCommandList( _renderTextureMipGenCommandList );
+			_renderTextureMipGenCommandList = null;
+		}
 	}
 
 	/// <summary>
@@ -665,16 +800,19 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 
 		using var setup = new CameraRenderer( $"{GameObject.Name}.RenderToTexture", sceneCamera._cameraId );
 
+		// The lock only covers reading the scene camera into this call's renderer. A top-level render
+		// waits for the whole frame inside the native call, and a child view rendered through this
+		// camera from the render thread needs the lock during that wait.
 		lock ( this )
 		{
 			setup.Configure( sceneCamera, config );
-
-			//
-			// Adds the views to the scene system
-			//
-			setup.Native.RenderToTexture( target.native, Graphics.SceneView );
-			setup.Native.ClearSceneWorlds();
 		}
+
+		//
+		// Adds the views to the scene system
+		//
+		setup.Native.RenderToTexture( target.native, Graphics.SceneView );
+		setup.Native.ClearSceneWorlds();
 
 
 		return true;
@@ -784,6 +922,8 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 		if ( Scene is null )
 			return;
 
+		bool resized = false;
+
 		foreach ( var panel in Scene.GetAll<ScreenPanel>() )
 		{
 			if ( !panel.IsValid() || !panel.Active )
@@ -805,7 +945,14 @@ public sealed partial class CameraComponent : Component, Component.ExecuteInEdit
 			rootPanel.CalculateLayout();
 			rootPanel.PostLayout();
 
+
 			rootPanel.BuildCommandList();
+			resized = true;
 		}
+
+		// The render consumes the combined list, not the per-root ones - without
+		// recombining, it draws the last real frame's layout at the old size.
+		if ( resized )
+			GlobalContext.Current.UISystem.CombineCommandLists();
 	}
 }

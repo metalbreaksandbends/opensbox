@@ -45,7 +45,7 @@ public static partial class Graphics
 		var clampedLod = Math.Max( lodLevel, 0 );
 		fixed ( Transform* pTransforms = transforms )
 		{
-			RenderTools.DrawModel( Context, SceneLayer, model.native, (IntPtr)pTransforms, transforms.Length, attributes.Get(), clampedLod );
+			RenderTools.DrawModel( Context, SceneLayer, DrawShaderMode, model.native, (IntPtr)pTransforms, transforms.Length, attributes.Get(), clampedLod );
 		}
 	}
 
@@ -73,7 +73,7 @@ public static partial class Graphics
 
 		fixed ( Transform* pTransforms = transforms )
 		{
-			RenderTools.DrawModel( Context, SceneLayer, model.native, (IntPtr)pTransforms, transforms.Length, attributes.Get() );
+			RenderTools.DrawModel( Context, SceneLayer, DrawShaderMode, model.native, (IntPtr)pTransforms, transforms.Length, attributes.Get() );
 		}
 	}
 
@@ -94,7 +94,36 @@ public static partial class Graphics
 
 		attributes ??= Attributes;
 
-		RenderTools.DrawModel( Context, SceneLayer, model.native, buffer.native, bufferOffset, attributes.Get() );
+		RenderTools.DrawModel( Context, SceneLayer, DrawShaderMode, model.native, buffer.native, bufferOffset, attributes.Get() );
+	}
+
+	/// <summary>
+	/// Draws instances of a model using GPU instancing, with per-instance transforms read from
+	/// <paramref name="transformBuffer"/> and the instance count provided by indirect draw arguments.
+	/// Unlike <see cref="DrawModelInstancedIndirect(Model, GpuBuffer, int, RenderAttributes)"/> this
+	/// feeds the standard `GetTransformMatrix()` instancing path, so normal/custom material shaders
+	/// render unchanged. The transform buffer must hold elements matching the engine transform layout
+	/// (a 3x4 transform plus extra shader data), indexed by instance.
+	/// </summary>
+	/// <param name="model">The model to draw</param>
+	/// <param name="transformBuffer">Per-instance transforms, indexed 0..count-1</param>
+	/// <param name="indirectArgs">Buffer containing the DrawIndexedInstancedArguments (created with <see cref="GpuBuffer.UsageFlags.IndirectDrawArguments"/>)</param>
+	/// <param name="argsOffset">Optional byte offset into the indirect args buffer</param>
+	/// <param name="lodLevel">LOD level to render (0 = highest detail)</param>
+	/// <param name="attributes">Optional attributes to apply only for this draw call</param>
+	public static void DrawModelInstancedIndirect( Model model, GpuBuffer transformBuffer, GpuBuffer indirectArgs, int argsOffset = 0, int lodLevel = 0, RenderAttributes attributes = null )
+	{
+		AssertRenderBlock();
+
+		if ( transformBuffer is null || indirectArgs is null )
+			return;
+
+		if ( !model.IsValid() )
+			return;
+
+		attributes ??= Attributes;
+
+		RenderTools.DrawModel( Context, SceneLayer, DrawShaderMode, model.native, transformBuffer.native, indirectArgs.native, argsOffset, attributes.Get(), lodLevel );
 	}
 
 	/// <summary>
@@ -119,6 +148,6 @@ public static partial class Graphics
 
 		attributes ??= Attributes;
 
-		RenderTools.DrawModel( Context, SceneLayer, model.native, IntPtr.Zero, count, attributes.Get() );
+		RenderTools.DrawModel( Context, SceneLayer, DrawShaderMode, model.native, IntPtr.Zero, count, attributes.Get() );
 	}
 }

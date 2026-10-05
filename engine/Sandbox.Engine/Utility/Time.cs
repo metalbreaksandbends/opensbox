@@ -2,6 +2,7 @@
 
 namespace Sandbox;
 
+[Expose]
 public class Time
 {
 	/// <summary>
@@ -31,6 +32,9 @@ public class Time
 		NowDouble = now;
 	}
 
+	/// <summary>
+	/// Temporarily override the game clock, restoring it when the scope is disposed.
+	/// </summary>
 	public static IDisposable Scope( double now, double delta )
 	{
 		var dn = NowDouble;

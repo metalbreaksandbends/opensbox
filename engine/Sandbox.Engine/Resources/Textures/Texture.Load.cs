@@ -64,15 +64,16 @@ public partial class Texture
 		if ( Sandbox.Mounting.Directory.TryLoad( filepath, ResourceType.Texture, out object model ) && model is Texture m )
 			return m;
 
-		var normalizedFilename = filepath.NormalizeFilename( false );
+		if ( !TextureLoader.ImageUrl.IsAppropriate( filepath ) && !TextureLoader.ImageDataUri.IsAppropriate( filepath ) )
+			filepath = filepath.NormalizeFilename( false );
 
-		if ( normalizedFilename.StartsWith( '/' ) )
-			normalizedFilename = normalizedFilename[1..];
+		if ( filepath.StartsWith( '/' ) )
+			filepath = filepath[1..];
 
-		if ( Find( normalizedFilename ) is Texture existing )
+		if ( Find( filepath ) is Texture existing )
 			return existing;
 
-		var tex = TryToLoad( filesystem, normalizedFilename, warnOnMissing );
+		var tex = TryToLoad( filesystem, filepath, warnOnMissing );
 		if ( tex == null )
 			return null;
 
@@ -84,6 +85,24 @@ public partial class Texture
 	/// Try to load a texture.
 	/// </summary>
 	public static Texture Load( string path_or_url, bool warnOnMissing = true ) => LoadInternal( GlobalContext.Current.FileMount, path_or_url, warnOnMissing );
+
+	internal static Texture Load( ResourceId id, bool warnOnMissing = true )
+	{
+		ThreadSafe.AssertIsMainThread();
+
+		if ( id.Guid is Guid guid )
+		{
+			if ( Game.Resources.TryGet<Texture>( guid, out var resource ) )
+				return resource;
+
+			var textureHandle = NativeGlue.Resources.GetTexture( id.Path, guid );
+			var t = FromNative( textureHandle );
+			t?.RegisterWeakResourceId( id.Path, guid );
+			return t;
+		}
+
+		return LoadInternal( GlobalContext.Current.FileMount, id.Path, warnOnMissing );
+	}
 
 	/// <summary>
 	/// Load avatar image of a Steam user (with a certain size if supplied).
@@ -116,7 +135,7 @@ public partial class Texture
 		var existing = Game.Resources.Get<Texture>( filepath );
 		if ( existing is not null )
 		{
-			existing.TryReload( filesystem, filepath );
+			existing.TryReload( filesystem, existing.ResourcePath );
 		}
 		else if ( filepath.StartsWith( "/" ) && TextureLoader.Image.IsAppropriate( filepath ) )
 		{
@@ -205,9 +224,9 @@ public partial class Texture
 		// Try to load from engine, which will worst case give us an error texture
 		//
 		ThreadSafe.AssertIsMainThread();
-		var textureHandle = NativeGlue.Resources.GetTexture( filepath );
+		var textureHandle = NativeGlue.Resources.GetTexture( filepath, Guid.Empty );
 		var t = FromNative( textureHandle );
-		t?.RegisterWeakResourceId( filepath );
+		t?.RegisterWeakResourceId( filepath, t.native.GetGuid() );
 		return t;
 	}
 
@@ -262,7 +281,8 @@ public partial class Texture
 	{
 		if ( string.IsNullOrWhiteSpace( filepath ) ) return null;
 
-		filepath = filepath.NormalizeFilename( false );
+		if ( !TextureLoader.ImageUrl.IsAppropriate( filepath ) && !TextureLoader.ImageDataUri.IsAppropriate( filepath ) )
+			filepath = filepath.NormalizeFilename( false );
 
 		return Game.Resources.Get<Texture>( filepath );
 	}

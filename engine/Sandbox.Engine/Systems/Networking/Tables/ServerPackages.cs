@@ -11,7 +11,7 @@ namespace Sandbox;
 /// </summary>
 internal class ServerPackages
 {
-	public static ServerPackages Current { get; private set; } = new();
+	public static ServerPackages Current { get; private set; }
 
 	internal record struct ServerPackageInfo();
 	internal StringTable StringTable;
@@ -68,7 +68,7 @@ internal class ServerPackages
 					await ServerPackages._resourceLoadSem.WaitAsync( token );
 					try
 					{
-						await ResourceLoader.LoadAllGameResourceAsync( activePackage.FileSystem, token );
+						await ResourceLoader.LoadAllGameResourceAsync( activePackage.FileSystem, token, sourcePackage: activePackage.Package );
 						FontManager.Instance.LoadAll( activePackage.FileSystem );
 					}
 					finally
@@ -100,9 +100,10 @@ internal class ServerPackages
 
 	static CaseInsensitiveDictionary<PackageDownload> Downloads;
 
+	CaseInsensitiveDictionary<int> _refcounts;
+
 	internal ServerPackages()
 	{
-		// WTF???
 		Current = this;
 
 		StringTable = new StringTable( "ServerPackages", true );
@@ -115,6 +116,23 @@ internal class ServerPackages
 	{
 		StringTable.Reset();
 		Downloads = new();
+		_refcounts = new();
+	}
+
+	[ConCmd( "list_serverpackages", Help = "Prints a summary of currently required server packages." )]
+	internal static void ListAll()
+	{
+		if ( Current == null )
+		{
+			Log.Info( "Not in a game." );
+			return;
+		}
+
+		Log.Info( $"{Current.StringTable.Entries.Count} required Server Package(s):" );
+		foreach ( var kvp in Current._refcounts )
+		{
+			Log.Info( $"\t{kvp.Key} (x{kvp.Value})" );
+		}
 	}
 
 	internal async Task InstallAll()
@@ -126,10 +144,17 @@ internal class ServerPackages
 
 		Log.Info( $"Installing {entries.Count} server packages.." );
 
-		if ( entries.Count > 0 )
-			LoadingScreen.Title = "Installing Packages";
-
 		var sw = System.Diagnostics.Stopwatch.StartNew();
+
+		// What's coming down, all of it sized up before the first byte - so the loading screen can show
+		// it as one bar, room made for each, rather than one download after another
+		if ( entries.Count > 0 )
+		{
+			LoadingScreen.Title = "Checking Packages";
+			await LoadingScreen.ReserveDownloads( entries.Keys );
+
+			LoadingScreen.Title = "Installing Packages";
+		}
 
 		// Install all packages without triggering a resource reload per-package,
 		// then do a single reload at the end.
@@ -154,23 +179,62 @@ internal class ServerPackages
 		await DownloadAndMount( ident, reloadResources: reloadResources );
 	}
 
+	/// <inheritdoc cref="AddRequirement(string, ServerPackageInfo)"/>
 	internal void AddRequirement( Package package, ServerPackageInfo info = default )
-	{
-		AddRequirement( package.GetIdent( false, true ), info );
-	}
+		=> AddRequirement( package.GetIdent( false, true ), info );
 
+	/// <summary>
+	/// Add a reference to a package requirement.
+	/// </summary>
 	internal void AddRequirement( string packageIdent, ServerPackageInfo info = default )
 	{
-		StringTable.Set( packageIdent, info );
+		if ( _refcounts.TryGetValue( packageIdent, out var count ) )
+		{
+			_refcounts[packageIdent] = count + 1;
+		}
+		else
+		{
+			_refcounts[packageIdent] = 1;
+			StringTable.Set( packageIdent, info );
+		}
 	}
 
-	internal async ValueTask<BaseFileSystem> DownloadAndMount( string packageIdent, CancellationToken token = default, bool reloadResources = true )
+	/// <inheritdoc cref="RemoveRequirement(string)"/>
+	internal void RemoveRequirement( Package package )
+		=> RemoveRequirement( package.GetIdent( false, true ) );
+
+	/// <summary>
+	/// Remove a reference to a package requirement.
+	/// When all references are removed, the package requirement is removed so new clients don't need to download it.
+	/// </summary>
+	/// <param name="packageIdent">Ident of the package, needs to match the ident format the requirement was added with :(</param>
+	internal void RemoveRequirement( string packageIdent )
+	{
+		if ( !_refcounts.TryGetValue( packageIdent, out var count ) )
+			return;
+
+		if ( count <= 1 )
+		{
+			_refcounts.Remove( packageIdent );
+			StringTable.Remove( packageIdent );
+		}
+		else
+		{
+			_refcounts[packageIdent] = count - 1;
+		}
+	}
+
+	/// <summary>
+	/// Install a package if it's not already installed.
+	/// If we're the host of a game, we'll register it as a requirement so clients will also install it.
+	/// </summary>
+	internal static async ValueTask<BaseFileSystem> DownloadAndMount( string packageIdent, CancellationToken token = default, bool reloadResources = true )
 	{
 		ThreadSafe.AssertIsMainThread();
 
 		if ( Networking.IsHost )
 		{
-			AddRequirement( packageIdent, new ServerPackageInfo() );
+			Current?.AddRequirement( packageIdent, new ServerPackageInfo() );
 		}
 
 		if ( Downloads.TryGetValue( packageIdent, out var dl ) )
@@ -184,7 +248,7 @@ internal class ServerPackages
 		return await dl.DownloadAndMount( token, reloadResources );
 	}
 
-	internal PackageDownload Get( string packageIdent )
+	internal static PackageDownload Get( string packageIdent )
 	{
 		if ( !Downloads.TryGetValue( packageIdent, out var dl ) )
 			return null;
@@ -198,10 +262,12 @@ internal class UpdateLoadingScreen : ILoadingInterface
 	public void Dispose()
 	{
 		LoadingScreen.Subtitle = "";
+		LoadingScreen.Progress = null;
 	}
 
 	public void LoadingProgress( LoadingProgress progress )
 	{
+		LoadingScreen.Progress = progress;
 		LoadingScreen.Title = $"{progress.Title}";
 		LoadingScreen.Subtitle = progress.Mbps > 0
 			? $"{progress.Percent:n0}% • {progress.Mbps:n0}mbps • {progress.CalculateETA().ToRemainingTimeString()}"

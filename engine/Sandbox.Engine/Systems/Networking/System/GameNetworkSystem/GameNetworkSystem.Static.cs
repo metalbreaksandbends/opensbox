@@ -100,9 +100,14 @@ public struct LobbyInformation
 	public string Game;
 
 	/// <summary>
-	/// Ping in milliseconds. Only available for dedicated servers, -1 if unknown.
+	/// Round-trip latency in milliseconds, or -1 if unknown. Steam lobbies use a relay-route estimate.
 	/// </summary>
 	public int Ping;
+
+	/// <summary>
+	/// True when Ping is estimated from Steam relay locations rather than measured from a server query.
+	/// </summary>
+	public bool IsPingEstimated;
 
 	public Dictionary<string, string> Data;
 
@@ -368,6 +373,8 @@ internal static class DedicatedServer
 	private static void OnConnected( SteamServersConnected_t cb )
 	{
 		Log.Warning( $"Connected to Steam" );
+
+		Utility.Steam.InitializeClient();
 	}
 
 	private static void OnDisconnected( SteamServersDisconnected_t cb )

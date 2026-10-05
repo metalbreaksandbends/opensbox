@@ -64,6 +64,19 @@ public abstract partial class GameResource : Resource, ISourceLineProvider
 	}
 
 	/// <summary>
+	/// The package this resource was loaded from, if it came from a downloaded/mounted package.
+	/// Null for resources that belong to the local/current project.
+	/// </summary>
+	[Hide, JsonIgnore]
+	internal Package Package { get; set; }
+
+	/// <summary>
+	/// True if this resource was loaded from a mounted remote (cloud) package rather than the local project.
+	/// </summary>
+	[Hide, JsonIgnore]
+	public bool IsRemote => Package is { IsRemote: true };
+
+	/// <summary>
 	/// True if we're waiting for our load to complete
 	/// </summary>
 	bool _awaitingLoad;
@@ -128,42 +141,52 @@ public abstract partial class GameResource : Resource, ISourceLineProvider
 	}
 
 	/// <summary>
-	/// Creates an instance of this type that will get loaded into later. This allows us to
+	/// Fetch a loaded resource, or set up a promise that will get loaded into later. This allows us to
 	/// have resources that reference other resources that aren't loaded yet (or are missing).
 	/// </summary>
-	internal static GameResource GetPromise( System.Type type, string filename )
+	internal static GameResource GetPromise( System.Type type, ResourceId id )
 	{
-		var path = FixPath( filename );
-		if ( string.IsNullOrEmpty( path ) ) return default;
+		if ( id.IsEmpty ) return default;
 
-		var obj = Game.Resources.Get( type, path ) as GameResource;
+		var obj = Game.Resources.Get( type, id ) as GameResource;
 		if ( obj != null ) return obj;
 
+		// create a new instance of the resource type and register it as a promise
 		obj = System.Activator.CreateInstance( type ) as GameResource;
-
 		if ( obj is null )
 		{
 			Log.Warning( $"Failed to create '{type.FullName}'" );
 			return default;
 		}
 
-		obj.InternalInitialize( filename );
+		obj.InitPromise( id );
 
 		Game.Resources.Register( obj );
 		return obj;
 	}
 
-	private void InternalInitialize( string filename )
+	private void InitPromise( ResourceId id )
 	{
-		ResourcePath = FixPath( filename );
-		ResourceName = System.IO.Path.GetFileNameWithoutExtension( ResourcePath );
-		// Keep this for backwards compat for now
+		// a GUID-only promise has no path yet, will only become known by something else finding it
+		// by GuidIndex and reconciling it (eg. LoadGameResource loading the real file)
+		if ( !string.IsNullOrEmpty( id.Path ) )
+		{
+			ResourcePath = FixPath( id.Path );
+			ResourceName = System.IO.Path.GetFileNameWithoutExtension( ResourcePath );
+			// Keep this for backwards compat for now
 #pragma warning disable CS0618 // Type or member is obsolete
-		ResourceId = ResourcePath.FastHash();
+			ResourceId = ResourcePath.FastHash();
 #pragma warning restore CS0618 // Type or member is obsolete
-		ResourceIdLong = ResourcePath.FastHash64();
+			ResourceIdLong = ResourcePath.FastHash64();
 
-		Manifest = AsyncResourceLoader.Load( ResourcePath );
+			// Sol: the actual load happens via LoadGameResource, what's this for?
+			Manifest = AsyncResourceLoader.Load( ResourcePath );
+		}
+
+		if ( id.Guid is Guid guid && guid != default )
+		{
+			Game.Resources.AssignGuid( this, guid );
+		}
 
 		_awaitingLoad = true;
 	}
@@ -306,11 +329,10 @@ public abstract partial class GameResource : Resource, ISourceLineProvider
 			throw new ArgumentException( "Couldn't load json" );
 		}
 
+		using var blobs = BlobDataSerializer.Load( BinaryData, ResourcePath );
+
 		JsonUpgrade( jso );
 		jso.Remove( "__version" );
-
-		// Load binary data for deserialization
-		using var blobs = BlobDataSerializer.Load( BinaryData, ResourcePath );
 
 		Deserialize( jso );
 
@@ -325,8 +347,29 @@ public abstract partial class GameResource : Resource, ISourceLineProvider
 	{
 		using ( PushSerializationScope() )
 		{
+			OnJsonDeserialize( jso );
 			Json.DeserializeToObject( this, jso );
 		}
+	}
+
+	/// <summary>
+	/// Called before deserialization, allowing optional state to be reset when its fields are absent.
+	/// </summary>
+	protected virtual void OnJsonDeserialize( JsonObject node )
+	{
+	}
+
+	/// <summary>
+	/// Copy the serialized state of another resource into this one, including binary blob data.
+	/// </summary>
+	public void CopyFrom( GameResource source )
+	{
+		var json = source.Serialize();
+		json.Remove( "__version" );
+
+		// Resolve $blob references from the binary data Serialize just captured
+		using var blobs = BlobDataSerializer.LoadFromMemory( source.BinaryData );
+		Deserialize( json );
 	}
 
 	/// <summary>
@@ -425,4 +468,3 @@ public abstract partial class GameResource : Resource, ISourceLineProvider
 		}
 	}
 }
-

@@ -14,7 +14,7 @@ internal static class ShadowMapperCallbacks
 	/// </summary>
 	static ConcurrentDictionary<IntPtr, ShadowMapper> ShadowMappers = [];
 
-	static ShadowMapper Get( IntPtr pLightMapper ) => ShadowMappers.GetOrAdd( pLightMapper, _ => new() );
+	static ShadowMapper Get( IntPtr pLightMapper ) => ShadowMappers.GetOrAdd( pLightMapper, _ => ShadowMapper.CreateNative() );
 
 	internal static void InitForView( IntPtr handle, ISceneView sceneView ) => Get( handle ).InitForView( sceneView );
 	internal static void SetShaderAttributes( IntPtr handle, CRenderAttributes renderAttr )
@@ -25,4 +25,18 @@ internal static class ShadowMapperCallbacks
 	internal static void UploadToGPU( IntPtr handle ) => Get( handle ).UploadToGPU();
 	internal static uint FindOrCreateShadowMaps( IntPtr handle, SceneLight sceneObject, ISceneView view, float flScreenSize ) => Get( handle ).FindOrCreateShadowMaps( sceneObject, view, flScreenSize );
 	internal static int DoDirectionalLight( IntPtr handle, SceneLight sceneObject, ISceneView view ) => Get( handle ).DoDirectionalLight( sceneObject, view );
+
+	/// <summary>
+	/// Run light command lists for the current Graphics view (after depth).
+	/// </summary>
+	internal static void RenderScreenSpaceShadows()
+	{
+		var view = Graphics.SceneView;
+
+		// A managed frame (r_managed_scene) has no native view to draw them for
+		if ( view.IsNull ) return;
+
+		foreach ( var sm in ShadowMappers.Values )
+			sm.RenderScreenSpaceShadows( view );
+	}
 }

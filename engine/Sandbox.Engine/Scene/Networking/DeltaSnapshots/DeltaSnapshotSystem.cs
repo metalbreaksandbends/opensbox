@@ -237,7 +237,7 @@ internal class DeltaSnapshotSystem
 					dataToSend ??= SnapshotData.Pool.Rent();
 					dataToSend[slot] = value;
 
-					state.AddPredicted( entry, Time );
+					state.AddPredicted( entry, snapshot.SnapshotId, Time );
 
 					entry.Connections?.Add( connectionId );
 				}
@@ -255,7 +255,7 @@ internal class DeltaSnapshotSystem
 					var slot = entry.Slot;
 					var value = entry.Value;
 
-					state.AddPredicted( entry, Time );
+					state.AddPredicted( entry, snapshot.SnapshotId, Time );
 					dataToSend[slot] = value;
 
 					entry.Connections?.Add( connectionId );
@@ -342,7 +342,7 @@ internal class DeltaSnapshotSystem
 				snapshotData ??= SnapshotData.Pool.Rent();
 				snapshotData[slot] = value;
 
-				state.AddPredicted( entry, Time );
+				state.AddPredicted( entry, snapshot.SnapshotId, Time );
 
 				entry.Connections?.Add( connectionId );
 			}
@@ -357,7 +357,7 @@ internal class DeltaSnapshotSystem
 				var slot = entry.Slot;
 				var value = entry.Value;
 
-				state.AddPredicted( entry, Time );
+				state.AddPredicted( entry, snapshot.SnapshotId, Time );
 				snapshotData[slot] = value;
 
 				entry.Connections?.Add( connectionId );
@@ -553,7 +553,7 @@ internal class DeltaSnapshotSystem
 			ackBs.Write( invalidSnapshotId );
 		}
 
-		System.Send( source, InternalMessageType.DeltaSnapshotClusterAck, ackBs.ToArray(),
+		System.Send( source, InternalMessageType.DeltaSnapshotClusterAck, ackBs.ToSpan(),
 			NetFlags.Unreliable | NetFlags.DiscardOnDelay );
 
 		ackBs.Dispose();
@@ -598,7 +598,7 @@ internal class DeltaSnapshotSystem
 			}
 			else
 			{
-				connectionData.ReceivedSnapshotStates[objectId] = RemoteSnapshotState.From( connectionId, snapshot );
+				state = connectionData.ReceivedSnapshotStates[objectId] = RemoteSnapshotState.From( connectionId, snapshot );
 			}
 
 			snapshotter.OnSnapshotAck( source, snapshot, state );
@@ -669,7 +669,7 @@ internal class DeltaSnapshotSystem
 		ackBs.Write( objectId );
 		ackBs.Write( snapshotId );
 
-		System.Send( source, InternalMessageType.DeltaSnapshotAck, ackBs.ToArray(),
+		System.Send( source, InternalMessageType.DeltaSnapshotAck, ackBs.ToSpan(),
 			NetFlags.Unreliable | NetFlags.DiscardOnDelay );
 
 		finalSnapshot.Release();

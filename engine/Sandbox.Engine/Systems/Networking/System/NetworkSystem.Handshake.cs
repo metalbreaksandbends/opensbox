@@ -34,6 +34,7 @@ internal partial class NetworkSystem
 			return;
 
 		IsDeveloperHost = msg.IsDeveloperHost;
+		IsHostMigrationEnabled = msg.HostMigration;
 
 		source.UpdateFrom( msg.Host );
 		source.State = Connection.ChannelState.LoadingServerInformation;
@@ -55,7 +56,7 @@ internal partial class NetworkSystem
 		}
 
 		log.Trace( $"Server Id is {source.Id}" );
-		log.Trace( $"Map Name is {msg.MapName}" );
+		log.Trace( $"Map is {msg.MapName} ({msg.Map})" );
 		log.Trace( $"Server Name is {msg.ServerName}" );
 		log.Trace( $"Engine version is {msg.EngineVersion}" );
 		log.Trace( $"Game Package is {msg.GamePackage}" );
@@ -73,7 +74,7 @@ internal partial class NetworkSystem
 
 			if ( !Application.IsStandalone )
 			{
-				LaunchArguments.Map = msg.MapPackage;
+				LaunchArguments.Map = msg.Map;
 
 				bool success = await IGameInstanceDll.Current.LoadGamePackageAsync( msg.GamePackage, flags, default );
 				if ( !success )
@@ -105,6 +106,34 @@ internal partial class NetworkSystem
 		Networking.MapName = msg.MapName;
 
 		//
+		// Check any required mount for this map
+		//
+		if ( Mounting.MountUtility.TryParse( msg.Map, out string ident ) )
+		{
+			// make sure the mount exists and is mounted
+			var mount = Mounting.Directory.Get( ident );
+			if ( mount is null || !mount.IsInstalled )
+			{
+				IGameInstanceDll.Current.Disconnect( $"Mount is not available: {ident}" );
+				Networking.Disconnect();
+				return;
+			}
+
+			LoadingScreen.Title = $"Mounting {mount.Title}";
+			await Mounting.Directory.Mount( ident );
+
+			// load the scene now so that it's ready by the time we get to snapshot
+			// which may/will reference procedural resources and could be out of order from the MapInstance doing it's thing (woof)
+			var scenefile = SceneFile.Load( msg.MapName );
+			if ( scenefile is null )
+			{
+				IGameInstanceDll.Current.Disconnect( $"Map not found: {msg.MapName}" );
+				Networking.Disconnect();
+				return;
+			}
+		}
+
+		//
 		// Tell me what I need
 		//
 		LoadingScreen.Title = "Fetching Server Data";
@@ -129,7 +158,7 @@ internal partial class NetworkSystem
 		if ( source.State != Connection.ChannelState.LoadingServerInformation )
 		{
 			source.Kick( $"Invalid Handshake State {source.State}" );
-			Log.Info( $"Kicking {source.DisplayName} [{source.SteamId}] Invalid Handshake State {source.State}" );
+			Log.Info( $"Kicking {source.Name} [{source.SteamId}] Invalid Handshake State {source.State}" );
 			return;
 		}
 
@@ -153,8 +182,7 @@ internal partial class NetworkSystem
 
 		source.PreInfo.Update( msg );
 
-		var displayName = source.DisplayName;
-		Log.Info( $"{displayName} [{msg.SteamId}] is connecting" );
+		Log.Info( $"{msg.Name} [{msg.SteamId}] is connecting" );
 
 		//
 		// If the lobby is set to FriendsOnly, only allow players who are Steam friends with the host.
@@ -166,7 +194,7 @@ internal partial class NetworkSystem
 			// Host is always allowed
 			if ( msg.SteamId != hostSteamId.Value && !new Friend( msg.SteamId ).IsFriend )
 			{
-				Log.Info( $"Kicked {displayName} [{msg.SteamId}] - not friends with host [{hostSteamId}]" );
+				Log.Info( $"Kicked {msg.Name} [{msg.SteamId}] - not friends with host [{hostSteamId}]" );
 				source.Kick( "This lobby is Friends Only." );
 				return;
 			}
@@ -177,7 +205,7 @@ internal partial class NetworkSystem
 
 		if ( GameSystem is not null && !GameSystem.AcceptConnection( source, ref denialReason ) )
 		{
-			Log.Info( $"Kicking {displayName} [{msg.SteamId}] - {denialReason}" );
+			Log.Info( $"Kicking {msg.Name} [{msg.SteamId}] - {denialReason}" );
 			source.Kick( denialReason );
 			return;
 		}
@@ -237,7 +265,12 @@ internal partial class NetworkSystem
 		log.Trace( "Welcome!" );
 
 		LoadingScreen.Title = "Loading Network Tables";
-		await IGameInstanceDll.Current?.LoadNetworkTables( this );
+		if ( !await IGameInstanceDll.Current?.LoadNetworkTables( this ) )
+		{
+			// code archive compile failed or something
+			Networking.Disconnect();
+			return;
+		}
 
 		LoadingScreen.Title = "Init Game System";
 		await InitializeGameSystemAsync();
@@ -265,7 +298,7 @@ internal partial class NetworkSystem
 		if ( source.State != Connection.ChannelState.Welcome )
 		{
 			source.Kick( $"Invalid Handshake State {source.State}" );
-			Log.Info( $"Kicking {source.DisplayName} [{source.SteamId}] Invalid Handshake State {source.State}" );
+			Log.Info( $"Kicking {source.Name} [{source.SteamId}] Invalid Handshake State {source.State}" );
 			return Task.CompletedTask;
 		}
 
@@ -317,7 +350,7 @@ internal partial class NetworkSystem
 		if ( source.State != Connection.ChannelState.MountVPKs )
 		{
 			source.Kick( $"Invalid Handshake State {source.State}" );
-			Log.Info( $"Kicking {source.DisplayName} [{source.SteamId}] Invalid Handshake State {source.State}" );
+			Log.Info( $"Kicking {source.Name} [{source.SteamId}] Invalid Handshake State {source.State}" );
 			return Task.CompletedTask;
 		}
 
@@ -330,21 +363,15 @@ internal partial class NetworkSystem
 
 		log.Trace( $"[{this}] Requesting a snapshot" );
 
-		var snapshot = new SnapshotMsg
+		var handshakeId = source.HandshakeId;
+		if ( GameSystem is not null )
 		{
-			GameObjectSystems = [],
-			NetworkObjects = new( 64 )
-		};
-
-		GameSystem?.GetSnapshot( source, ref snapshot );
-
-		var output = new InitialSnapshotResponse
+			GameSystem.SendSnapshot( source, snapshot => new InitialSnapshotResponse { HandshakeId = handshakeId, Snapshot = snapshot } );
+		}
+		else
 		{
-			HandshakeId = source.HandshakeId,
-			Snapshot = snapshot
-		};
-
-		source.SendMessage( output );
+			source.SendMessage( new InitialSnapshotResponse { HandshakeId = handshakeId, Snapshot = SnapshotMsg.Create() } );
+		}
 		return Task.CompletedTask;
 	}
 
@@ -411,7 +438,7 @@ internal partial class NetworkSystem
 		if ( source.State != Connection.ChannelState.Snapshot )
 		{
 			source.Kick( $"Invalid Handshake State {source.State}" );
-			Log.Info( $"Kicking {source.DisplayName} [{source.SteamId}] Invalid Handshake State {source.State}" );
+			Log.Info( $"Kicking {source.Name} [{source.SteamId}] Invalid Handshake State {source.State}" );
 			return Task.CompletedTask;
 		}
 
@@ -427,7 +454,7 @@ internal partial class NetworkSystem
 
 		source.SendMessage( output );
 
-		Log.Info( $"{source.DisplayName} [{source.SteamId}] is connected" );
+		Log.Info( $"{source.Name} [{source.SteamId}] is connected" );
 
 		return Task.CompletedTask;
 	}
@@ -450,7 +477,9 @@ internal partial class NetworkSystem
 			return Task.CompletedTask;
 		}
 
-		IGameInstanceDll.Current.Disconnect( $"Kicked from server.\n\nReason: {msg.Reason}" );
+		FailureReason = $"Kicked from server.\n\nReason: {msg.Reason}";
+		Api.Activity.SetExitReason( "kicked", msg.Reason );
+		IGameInstanceDll.Current.Disconnect( FailureReason );
 		return Task.CompletedTask;
 	}
 
@@ -465,8 +494,14 @@ internal partial class NetworkSystem
 		if ( msg.HandshakeId != Connection.Local.HandshakeId )
 			return Task.CompletedTask;
 
+		if ( Application.IsEditor )
+		{
+			IToolsDll.Current?.SetPlaying();
+		}
+
 		Log.Trace( $"[{this}] I am spawning into the game!" );
 		LoadingScreen.IsVisible = false;
+		Api.Activity.LoadFinished();
 
 		Connection.Local.State = Connection.ChannelState.Connected;
 		source.State = Connection.ChannelState.Connected;

@@ -19,147 +19,370 @@ internal static partial class DebugOverlay
 		};
 
 		private static readonly TextRendering.Outline _outline = new() { Color = Color.Black, Size = 2, Enabled = true };
-		private static readonly List<RowData> _rows = new( 32 );
-
 		private const float RowHeight = 16f;
 		private const float NameWidth = 234f;
 		private const float GaugeWidth = 160f;
 		private const float ValueWidth = 74f;
 		private const float GaugeScaleMs = 16f;
-		private const int MaxRows = 20;
 		private const float MinVisibleMs = 0.02f;
+		private const float IndentWidth = 20f;
 
-		private readonly struct RowData
+		private sealed class Node
 		{
-			public readonly string Name;
-			public readonly float AvgMs;
-			public readonly float MaxMs;
-			public readonly Color Color;
-
-			public RowData( string name, float avgMs, float maxMs, Color color )
-			{
-				Name = name;
-				AvgMs = avgMs;
-				MaxMs = maxMs;
-				Color = color;
-			}
+			public string Name;
+			public uint StableId;
+			public float AvgMs;
+			public float MaxMs;
+			public bool Measured;
+			public bool Unparented;
+			public float SubtreeAvgMs;
+			public readonly List<Node> Children = new();
 		}
 
-		internal static void Draw( ref Vector2 pos )
+		private static readonly Node _root = new();
+		private static readonly List<Node> _nodes = new();
+
+		private static readonly Dictionary<uint, int> _colorIndexById = new();
+		private static readonly List<uint> _colorPrune = new();
+		private static int _colorRotation;
+
+		private static readonly Dictionary<uint, float> _sortScore = new();
+
+		internal static void Draw( Painter painter, ref Vector2 pos )
 		{
-			var entries = GpuProfilerStats.Entries;
-			if ( entries.Count == 0 )
+			var rowCount = GpuProfilerStats.RowCount;
+			if ( rowCount == 0 )
 			{
-				DrawNoData( ref pos );
+				DrawNoData( painter, ref pos );
 				return;
 			}
 
-			_rows.Clear();
+			_root.Children.Clear();
+			_nodes.Clear();
 
-			for ( var i = 0; i < entries.Count; i++ )
+			for ( var i = 0; i < rowCount; i++ )
 			{
-				var entry = entries[i];
-				var avgMs = GpuProfilerStats.GetSmoothedDuration( entry.Name );
-				var maxMs = GpuProfilerStats.GetMaxDuration( entry.Name );
+				var row = GpuProfilerStats.GetRow( i );
 
-				if ( avgMs < MinVisibleMs || entry.Name.StartsWith( "Managed:", StringComparison.Ordinal ) )
-					continue;
+				var node = new Node
+				{
+					Name = row.Name,
+					StableId = row.StableId,
+					Measured = row.Measured,
+					Unparented = row.Unparented,
+					AvgMs = row.Measured ? GpuProfilerStats.GetSmoothedDuration( row.StableId ) : 0f,
+					MaxMs = row.Measured ? GpuProfilerStats.GetMaxDuration( row.StableId ) : 0f,
+				};
 
-				_rows.Add( new RowData( entry.Name, avgMs, maxMs, PassColors[i % PassColors.Length] ) );
+				_nodes.Add( node );
+
+				var parent = (row.Parent >= 0 && row.Parent < _nodes.Count - 1) ? _nodes[row.Parent] : _root;
+				parent.Children.Add( node );
 			}
 
-			_rows.Sort( static ( a, b ) => b.AvgMs.CompareTo( a.AvgMs ) );
+			PruneBelowThreshold( _root );
 
-			if ( _rows.Count > MaxRows )
-				_rows.RemoveRange( MaxRows, _rows.Count - MaxRows );
-
-			if ( _rows.Count == 0 )
+			if ( _root.Children.Count == 0 )
 			{
-				DrawNoData( ref pos );
+				DrawNoData( painter, ref pos );
 				return;
 			}
 
-			var totalMs = MathF.Max( GpuProfilerStats.TotalGpuTimeMs, 0.001f );
-			var scaleMs = GaugeScaleMs;
+			ComputeSubtree( _root );
+
+			UpdateSortScores( _root );
+			SortChildren( _root );
+			ReconcileColors();
+
+			var layerMs = 0f;
+			foreach ( var n in _root.Children )
+			{
+				if ( !n.Unparented ) layerMs += n.SubtreeAvgMs;
+			}
+			layerMs = MathF.Max( layerMs, 0.001f );
+
+			var gpuFrameMs = PerformanceStats.GpuFrametime;
+			var shareDenomMs = gpuFrameMs > 0f ? gpuFrameMs : layerMs;
 
 			var x = pos.x;
 			var y = pos.y;
-			var colName = x;
-			var colGauge = colName + NameWidth + 8;
+			var colGauge = x + NameWidth + 8;
 			var colAvg = colGauge + GaugeWidth + 10;
 			var colMax = colAvg + ValueWidth;
 			var colShare = colMax + ValueWidth;
 
-			DrawTitle( ref y, x );
-			DrawSummary( ref y, x, totalMs );
-			DrawHeader( ref y, colName, colAvg, colMax, colShare );
+			DrawTitle( painter, ref y, x );
+			DrawSummary( painter, ref y, x, layerMs );
+			DrawHeader( painter, ref y, x, colAvg, colMax, colShare );
 
-			for ( var i = 0; i < _rows.Count; i++ )
+			foreach ( var n in _root.Children )
 			{
-				DrawRow( ref y, _rows[i], totalMs, scaleMs, colName, colGauge, colAvg, colMax, colShare );
+				var family = PassColors[_colorIndexById.GetValueOrDefault( n.StableId )];
+				DrawNode( painter, ref y, n, 0, family, shareDenomMs, x, colGauge, colAvg, colMax, colShare );
 			}
+
+			y += 16f;
+
+			DrawMemoryBar( painter, ref y, x );
+			DrawMemorySummary( painter, ref y, x );
 
 			pos.y = y;
 		}
 
-		private static void DrawTitle( ref float y, float x )
+		/// <summary>
+		/// Drop anything too small to read, subtree included. Returns the weight the node contributes so a
+		/// grouping row whose children all vanished goes with them.
+		/// </summary>
+		private static float PruneBelowThreshold( Node n )
 		{
-			var scope = new TextRendering.Scope( "GPU Timings", Color.White.WithAlpha( 0.9f ), 11, "Roboto Mono", 700 ) { Outline = _outline };
-			Hud.DrawText( scope, new Rect( x, y, 560, RowHeight ), TextFlag.LeftCenter );
-			y += RowHeight;
+			var childTotal = 0f;
+
+			for ( var i = n.Children.Count - 1; i >= 0; i-- )
+			{
+				var weight = PruneBelowThreshold( n.Children[i] );
+
+				if ( weight < MinVisibleMs )
+					n.Children.RemoveAt( i );
+				else
+					childTotal += weight;
+			}
+
+			return n.Measured ? MathF.Max( n.AvgMs, childTotal ) : childTotal;
 		}
 
-		private static void DrawSummary( ref float y, float x, float totalMs )
+		private static float ComputeSubtree( Node n )
 		{
-			var fpsMax = 1000f / totalMs;
-			var color = totalMs > 16.67f ? new Color( 1f, 0.65f, 0.35f ) : Color.White.WithAlpha( 0.9f );
-			var scope = new TextRendering.Scope( $"GPU total {totalMs:F2}ms  ({fpsMax:F0} fps max)", color, 11, "Roboto Mono", 700 ) { Outline = _outline };
-			Hud.DrawText( scope, new Rect( x, y, 560, RowHeight ), TextFlag.LeftCenter );
-			y += RowHeight;
+			if ( n.Children.Count == 0 )
+			{
+				n.SubtreeAvgMs = n.AvgMs;
+				return n.SubtreeAvgMs;
+			}
+
+			var childSum = 0f;
+			foreach ( var c in n.Children )
+				childSum += ComputeSubtree( c );
+
+			n.SubtreeAvgMs = n.Measured ? n.AvgMs : childSum;
+			return n.SubtreeAvgMs;
 		}
 
-		private static void DrawHeader( ref float y, float colName, float colAvg, float colMax, float colShare )
+		private static void UpdateSortScores( Node n )
 		{
-			var dim = Color.White.WithAlpha( 0.55f );
-			DrawCell( "pass", dim, colName, y, NameWidth, TextFlag.LeftCenter );
-			DrawCell( "avg", dim, colAvg, y, ValueWidth, TextFlag.LeftCenter );
-			DrawCell( "max", dim, colMax, y, ValueWidth, TextFlag.LeftCenter );
-			DrawCell( "%", dim, colShare, y, ValueWidth, TextFlag.LeftCenter );
-			y += RowHeight;
+			foreach ( var c in n.Children )
+			{
+				var cur = _sortScore.GetValueOrDefault( c.StableId, c.SubtreeAvgMs );
+				_sortScore[c.StableId] = cur + (c.SubtreeAvgMs - cur) * MathF.Min( 1f, Time.Delta * 2f );
+				UpdateSortScores( c );
+			}
 		}
 
-		private static void DrawRow( ref float y, RowData row, float totalMs, float scaleMs, float colName, float colGauge, float colAvg, float colMax, float colShare )
+		private static void SortChildren( Node n )
 		{
-			DrawCell( row.Name, row.Color.Lighten( 0.45f ), colName, y, NameWidth, TextFlag.LeftCenter );
+			n.Children.Sort( static ( a, b ) => _sortScore.GetValueOrDefault( b.StableId ).CompareTo( _sortScore.GetValueOrDefault( a.StableId ) ) );
+			foreach ( var c in n.Children )
+				SortChildren( c );
+		}
+
+		private static void DrawNode( Painter painter, ref float y, Node n, int depth, Color familyColor, float shareDenomMs, float xName, float colGauge, float colAvg, float colMax, float colShare )
+		{
+			var indent = depth * IndentWidth;
+
+			// The unparented bucket collects scopes no layer enclosed, it is not a real pass
+			var isDim = n.Unparented;
+
+			// Shade darker with depth so each subtree reads as one colour family; capped so deep levels stay legible.
+			var shade = familyColor.Darken( MathF.Min( 0.33f, depth * 0.25f ) );
+			var nameColor = isDim ? Color.White.WithAlpha( 0.5f ) : shade.Lighten( 0.2f );
+			var barColor = isDim ? new Color( 0.55f, 0.55f, 0.55f ) : shade;
+
+			var nameWeight = Math.Max( 400, 700 - depth * 100 );
+			DrawCell( painter, n.Name, nameColor, xName + indent, y, NameWidth - indent, TextFlag.LeftCenter, nameWeight );
+
+			var avg = n.Measured ? n.AvgMs : n.SubtreeAvgMs;
 
 			var gauge = new Rect( colGauge, y + 1, GaugeWidth, RowHeight - 2 );
-			Hud.DrawRect( gauge, Color.Black.WithAlpha( 0.1f ) );
+			painter.Fill = Color.Black.WithAlpha( 0.1f );
+			painter.Stroke = Stroke.None;
+			painter.Rect( gauge.SnapToGrid() );
+			if ( n.Measured )
+			{
+				var maxW = MathF.Min( gauge.Width, (n.MaxMs / GaugeScaleMs) * gauge.Width );
+				painter.Fill = barColor.WithAlpha( 0.14f );
+				painter.Stroke = Stroke.None;
+				painter.Rect( new Rect( gauge.Left, gauge.Top, MathF.Max( 1, maxW ), gauge.Height ).SnapToGrid() );
+			}
+			var avgW = MathF.Min( gauge.Width, (avg / GaugeScaleMs) * gauge.Width );
+			painter.Fill = barColor.WithAlpha( 0.65f );
+			painter.Stroke = Stroke.None;
+			painter.Rect( new Rect( gauge.Left, gauge.Top, MathF.Max( 1, avgW ), gauge.Height ).SnapToGrid() );
 
-			var maxW = MathF.Min( gauge.Width, (row.MaxMs / scaleMs) * gauge.Width );
-			Hud.DrawRect( new Rect( gauge.Left, gauge.Top, MathF.Max( 1, maxW ), gauge.Height ), row.Color.WithAlpha( 0.14f ) );
-
-			var avgW = MathF.Min( gauge.Width, (row.AvgMs / scaleMs) * gauge.Width );
-			Hud.DrawRect( new Rect( gauge.Left, gauge.Top, MathF.Max( 1, avgW ), gauge.Height ), row.Color.WithAlpha( 0.65f ) );
-
-			var sharePct = (row.AvgMs / totalMs) * 100f;
+			var sharePct = (avg / shareDenomMs) * 100f;
 			var valueColor = Color.White.WithAlpha( 0.85f );
-			DrawCell( $"{row.AvgMs:F2}ms", valueColor, colAvg, y, ValueWidth, TextFlag.LeftCenter );
-			DrawCell( $"{row.MaxMs:F2}ms", valueColor, colMax, y, ValueWidth, TextFlag.LeftCenter );
-			DrawCell( $"{sharePct:F1}%", valueColor, colShare, y, ValueWidth, TextFlag.LeftCenter );
+			DrawCell( painter, $"{avg:F2}ms", valueColor, colAvg, y, ValueWidth, TextFlag.LeftCenter );
+			DrawCell( painter, n.Measured ? $"{n.MaxMs:F2}ms" : "", valueColor, colMax, y, ValueWidth, TextFlag.LeftCenter );
+			DrawCell( painter, $"{sharePct:F1}%", valueColor, colShare, y, ValueWidth, TextFlag.LeftCenter );
 
 			y += RowHeight + 1;
+
+			foreach ( var c in n.Children )
+				DrawNode( painter, ref y, c, depth + 1, familyColor, shareDenomMs, xName, colGauge, colAvg, colMax, colShare );
 		}
 
-		private static void DrawCell( string text, Color color, float x, float y, float width, TextFlag flag )
+		// Only top-level nodes hold a palette slot; keep it stable across frames by dropping slots for paths
+		// that left the tree before assigning free slots to new ones.
+		private static void ReconcileColors()
 		{
-			var scope = new TextRendering.Scope( text, color, 11, "Roboto Mono", 600 ) { Outline = _outline };
-			Hud.DrawText( scope, new Rect( x, y, width, RowHeight ), flag );
+			_colorPrune.Clear();
+			foreach ( var p in _colorIndexById.Keys )
+			{
+				var stillTop = false;
+				foreach ( var n in _root.Children )
+				{
+					if ( n.StableId == p ) { stillTop = true; break; }
+				}
+				if ( !stillTop ) _colorPrune.Add( p );
+			}
+			foreach ( var p in _colorPrune ) _colorIndexById.Remove( p );
+
+			foreach ( var n in _root.Children )
+			{
+				if ( n.Unparented )
+					continue;
+
+				if ( !_colorIndexById.ContainsKey( n.StableId ) )
+					_colorIndexById[n.StableId] = PickFreeColorIndex();
+			}
 		}
 
-		private static void DrawNoData( ref Vector2 pos )
+		private static int PickFreeColorIndex()
+		{
+			Span<bool> used = stackalloc bool[PassColors.Length];
+			foreach ( var idx in _colorIndexById.Values )
+				used[idx] = true;
+
+			for ( var i = 0; i < used.Length; i++ )
+			{
+				if ( !used[i] ) return i;
+			}
+
+			_colorRotation = (_colorRotation + 1) % PassColors.Length;
+			return _colorRotation;
+		}
+
+		private static void DrawTitle( Painter painter, ref float y, float x )
+		{
+			var scope = new TextRendering.Scope( "GPU Timings", Color.White.WithAlpha( 0.9f ), 11, "Roboto Mono", 700 ) { Outline = _outline };
+			DebugOverlay.DrawText( painter, scope, new Rect( x, y, 560, RowHeight ), TextFlag.LeftCenter );
+			y += RowHeight;
+		}
+
+		private static void DrawSummary( Painter painter, ref float y, float x, float totalMs )
+		{
+			// Whole-frame GPU time is authoritative; the per-pass sum over-counts (overlapping groups), so it's only a breakdown total.
+			var gpuFrameMs = PerformanceStats.GpuFrametime;
+
+			string text;
+			Color color;
+			if ( gpuFrameMs > 0f )
+			{
+				var fps = 1000f / gpuFrameMs;
+				color = gpuFrameMs > 16.67f ? new Color( 1f, 0.65f, 0.35f ) : Color.White.WithAlpha( 0.9f );
+				text = $"GPU frame {gpuFrameMs:F2}ms  ({fps:F0} fps)";
+			}
+			else
+			{
+				color = totalMs > 16.67f ? new Color( 1f, 0.65f, 0.35f ) : Color.White.WithAlpha( 0.9f );
+				text = $"GPU {totalMs:F2}ms";
+			}
+
+			var scope = new TextRendering.Scope( text, color, 11, "Roboto Mono", 700 ) { Outline = _outline };
+			DebugOverlay.DrawText( painter, scope, new Rect( x, y, 560, RowHeight ), TextFlag.LeftCenter );
+			y += RowHeight;
+		}
+
+		private static void DrawHeader( Painter painter, ref float y, float colName, float colAvg, float colMax, float colShare )
+		{
+			var dim = Color.White.WithAlpha( 0.55f );
+			DrawCell( painter, "pass", dim, colName, y, NameWidth, TextFlag.LeftCenter );
+			DrawCell( painter, "avg", dim, colAvg, y, ValueWidth, TextFlag.LeftCenter );
+			DrawCell( painter, "max", dim, colMax, y, ValueWidth, TextFlag.LeftCenter );
+			DrawCell( painter, "%", dim, colShare, y, ValueWidth, TextFlag.LeftCenter );
+			y += RowHeight;
+		}
+
+		private static void DrawMemorySummary( Painter painter, ref float y, float x )
+		{
+			var usedBytes = (long)GpuProfilerStats.VideoMemoryUsed;
+			var budgetBytes = (long)GpuProfilerStats.VideoMemoryBudget;
+			var freeBytes = (long)GpuProfilerStats.VideoMemoryFree;
+			var usageFraction = GpuProfilerStats.VideoMemoryUsageFraction;
+
+			var color = usageFraction switch
+			{
+				> 0.90f => new Color( 1f, 0.45f, 0.35f ),
+				> 0.75f => new Color( 1f, 0.75f, 0.35f ),
+				_ => Color.White.WithAlpha( 0.85f )
+			};
+
+			var text = budgetBytes > 0
+				? $"GPU memory {usedBytes.FormatBytes()} / {budgetBytes.FormatBytes()} ({usageFraction * 100f:F0}% used, {freeBytes.FormatBytes()} free)"
+				: $"GPU memory {usedBytes.FormatBytes()} used";
+
+			var scope = new TextRendering.Scope( text, color, 11, "Roboto Mono", 600 ) { Outline = _outline };
+			DebugOverlay.DrawText( painter, scope, new Rect( x, y, 560, RowHeight ), TextFlag.LeftCenter );
+			y += RowHeight;
+		}
+
+		private static void DrawMemoryBar( Painter painter, ref float y, float x )
+		{
+			var usedBytes = (long)GpuProfilerStats.VideoMemoryUsed;
+			var budgetBytes = (long)GpuProfilerStats.VideoMemoryBudget;
+			var totalBytes = Math.Max( 1L, budgetBytes > 0 ? budgetBytes : usedBytes );
+			var usedFraction = Math.Clamp( usedBytes / (float)totalBytes, 0f, 1f );
+			var freeFraction = 1f - usedFraction;
+
+			var usedColor = usedFraction switch
+			{
+				> 0.90f => new Color( 1f, 0.45f, 0.35f ),
+				> 0.75f => new Color( 1f, 0.75f, 0.35f ),
+				_ => new Color( 0.45f, 0.80f, 0.55f )
+			};
+
+			var barRect = new Rect( x, y + 2, 560, 8 );
+			painter.Fill = Color.Black.WithAlpha( 0.22f );
+			painter.Stroke = Stroke.None;
+			painter.Rect( barRect.SnapToGrid() );
+
+			var usedWidth = barRect.Width * usedFraction;
+			if ( usedWidth > 0f )
+			{
+				painter.Fill = usedColor.WithAlpha( 0.85f );
+				painter.Stroke = Stroke.None;
+				painter.Rect( new Rect( barRect.Left, barRect.Top, usedWidth, barRect.Height ).SnapToGrid() );
+			}
+
+			if ( freeFraction > 0f )
+			{
+				var freeLeft = barRect.Left + usedWidth;
+				var freeWidth = barRect.Width * freeFraction;
+				painter.Fill = Color.White.WithAlpha( 0.15f );
+				painter.Stroke = Stroke.None;
+				painter.Rect( new Rect( freeLeft, barRect.Top, freeWidth, barRect.Height ).SnapToGrid() );
+			}
+
+			y += RowHeight - 4;
+		}
+
+		private static void DrawCell( Painter painter, string text, Color color, float x, float y, float width, TextFlag flag, int weight = 600 )
+		{
+			var scope = new TextRendering.Scope( text, color, 11, "Roboto Mono", weight ) { Outline = _outline };
+			DebugOverlay.DrawText( painter, scope, new Rect( x, y, width, RowHeight ), flag );
+		}
+
+		private static void DrawNoData( Painter painter, ref Vector2 pos )
 		{
 			var scope = new TextRendering.Scope( "GPU profiler: waiting for data...", Color.White.WithAlpha( 0.6f ), 11, "Roboto Mono", 600 ) { Outline = _outline };
-			Hud.DrawText( scope, new Rect( pos, new Vector2( 320, RowHeight ) ), TextFlag.LeftCenter );
+			DebugOverlay.DrawText( painter, scope, new Rect( pos, new Vector2( 320, RowHeight ) ), TextFlag.LeftCenter );
 			pos.y += RowHeight;
 		}
 
